@@ -3,12 +3,15 @@
 // so it's safe to call this on every detection.
 
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 
 const char* WIFI_SSID     = "your-wifi";
 const char* WIFI_PASSWORD = "your-password";
-const char* ENTITY_URL     = "http://192.168.1.50:8000/api/trigger?sensor=washroom-door"; // the Pi's IP (shown in the dashboard logs on startup)
-const char* TRIGGER_TOKEN = "";  // same value as TRIGGER_TOKEN in the server's .env (leave "" if unset)
+// Hosted on Render:  "https://<your-service>.onrender.com/api/trigger?sensor=washroom-door"
+// On the LAN:        "http://192.168.1.50:8000/api/trigger?sensor=washroom-door" (the IP is in the dashboard logs on startup)
+const char* ENTITY_URL    = "https://your-service.onrender.com/api/trigger?sensor=washroom-door";
+const char* TRIGGER_TOKEN = "";  // same value as TRIGGER_TOKEN on the server (leave "" if unset)
 
 void connectWifi() {
   if (WiFi.status() == WL_CONNECTED) return;
@@ -23,8 +26,12 @@ bool triggerEntity() {
   if (WiFi.status() != WL_CONNECTED) return false;
 
   HTTPClient http;
-  http.begin(ENTITY_URL);
-  http.setTimeout(3000);
+  WiFiClientSecure secureClient;
+  WiFiClient plainClient;
+  bool https = strncmp(ENTITY_URL, "https://", 8) == 0;
+  if (https) secureClient.setInsecure();  // skip certificate checks; use setCACert() with Render's root CA to be strict
+  if (!(https ? http.begin(secureClient, ENTITY_URL) : http.begin(plainClient, ENTITY_URL))) return false;
+  http.setTimeout(20000);  // a sleeping free Render instance can take a while to answer the first request
   if (strlen(TRIGGER_TOKEN) > 0) http.addHeader("X-Trigger-Token", TRIGGER_TOKEN);
   int code = http.POST("");
   String body = http.getString();  // {"accepted":true|false,"reason":"...","state":"..."}

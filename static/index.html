@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Washroom Bhoot</title>
+<!-- ElevenLabs browser SDK: the conversation runs in this page on the device with voice enabled. -->
+<script src="https://cdn.jsdelivr.net/npm/@elevenlabs/client@1.27.0/dist/lib.iife.js" defer></script>
 <style>
   :root {
     --bg: #0d0c0f;
@@ -52,6 +54,26 @@
   #musicBtn { padding: 4px 10px; font-size: 12px; border-radius: 999px; color: var(--muted); }
   #musicBtn.on { color: var(--text); border-color: var(--muted); }
   #musicBtn.playing { color: var(--entity); border-color: var(--entity); }
+  #voiceBtn { padding: 4px 10px; font-size: 12px; border-radius: 999px; color: var(--muted); }
+  #voiceBtn.on { color: var(--ok); border-color: var(--ok); }
+  #voiceBtn.arm { color: var(--trigger); border-color: var(--trigger); animation: pulse 1.2s infinite; }
+  #voiceBtn.live { color: var(--accent); border-color: var(--accent); animation: pulse .8s infinite; }
+
+  /* The voice gate: a popup that asks whether this browser is the washroom device, and takes the one click
+     browsers need before they allow the microphone and sound. */
+  #voiceGate {
+    position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center;
+    padding: 16px; background: rgba(6, 5, 8, .82); backdrop-filter: blur(4px); cursor: pointer;
+  }
+  #voiceGate[hidden] { display: none; }
+  .gate-card {
+    width: min(440px, 100%); background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+    padding: 24px; box-shadow: 0 20px 60px rgba(0, 0, 0, .6); cursor: default;
+  }
+  .gate-card h2 { font-size: 20px; color: var(--text); text-transform: none; letter-spacing: 0; margin: 0 0 8px; }
+  .gate-card p { margin: 0 0 18px; color: var(--muted); }
+  .gate-card .btn-primary { margin-bottom: 8px; }
+  .gate-card .hint { min-height: 0; }
 
   main {
     display: grid; grid-template-columns: 340px 1fr; gap: 16px; padding: 16px;
@@ -168,6 +190,7 @@
   <div class="pill" id="statePill" data-state="starting"><span class="dot"></span><span id="stateText">starting</span></div>
   <span class="conn" id="conn">connecting…</span>
   <button id="musicBtn" type="button" title="Idle music (plays only while the entity is idle)">♪ idle music</button>
+  <button id="voiceBtn" type="button" title="The entity's voice (and its mic) run in the browser that has this on. Turn it on only on the machine in the washroom.">🎙 voice</button>
   <span class="meta" id="agentMeta"></span>
 </header>
 
@@ -175,6 +198,15 @@
 <audio id="idleMusic" src="/res/Infinite_Dancefloor.mp3" loop preload="auto"></audio>
 <!-- res/<Persona>/approach.wav, played here for now; the server tells us which one via status.approach_cue. -->
 <audio id="approachAudio" preload="auto"></audio>
+
+<div id="voiceGate" hidden>
+  <div class="gate-card">
+    <h2>👻 Washroom Bhoot</h2>
+    <p id="gateText">This experience needs access to your microphone and speakers.</p>
+    <button class="btn-primary" id="gateYes" type="button">🎙 Allow microphone and sound</button>
+    <div class="hint" id="gateHint"></div>
+  </div>
+</div>
 
 <main>
   <div class="stack">
@@ -246,7 +278,7 @@
           </div>
           <div class="timeline" id="timeline"></div>
           <button type="button" id="previewBtn">Preview timeline</button>
-          <small id="timelineHint">Preview runs the tape and the approach cue in this browser with the values above (even unsaved), without the AI. Real triggers use the saved values. The approach cue is res/&lt;Persona&gt;/approach.wav; the AI's voice still comes from the server.</small>
+          <small id="timelineHint">Preview runs the tape and the approach cue in this browser with the values above (even unsaved), without the AI. Real triggers use the saved values. The approach cue is res/&lt;Persona&gt;/approach.wav. At "AI connects" the dashboard with voice enabled starts the ElevenLabs conversation.</small>
         </fieldset>
         <div class="field">
           <div class="range-head">
@@ -259,23 +291,21 @@
             <output id="reverb_decay_ms_out"></output>
           </div>
           <input type="range" id="reverb_decay_ms" name="reverb_decay_ms" min="300" max="4000" step="100">
-          <small>Echo added to the entity's voice on this machine. 0% turns it off.</small>
+          <small>Echo added to the entity's voice in the browser that plays it. 0% turns it off.</small>
         </div>
         <fieldset class="group">
-          <legend>Voice shifting (Voicemeeter)</legend>
+          <legend>Voice shifting (stereo)</legend>
           <div class="field check">
             <input type="checkbox" id="shift_enabled" name="shift_enabled">
-            <label for="shift_enabled">Let the entity move<small>When it writes [shift], its voice glides to another output.</small></label>
+            <label for="shift_enabled">Let the entity move<small>When it writes [shift], its voice glides from one side of the stereo field to the other. Put one speaker on the left channel and one on the right, in different spots of the room.</small></label>
           </div>
           <div class="field">
-            <label for="shift_outputs">Outputs (spots in the room)</label>
-            <input type="text" id="shift_outputs" name="shift_outputs" spellcheck="false" autocomplete="off" placeholder="A1,A2">
-            <small>Voicemeeter buses, comma-separated (A1, A2, A3, B1, B2).</small>
-          </div>
-          <div class="field">
-            <label for="shift_gain_db">Gain where it is (dB)</label>
-            <input type="number" id="shift_gain_db" name="shift_gain_db" min="-60" max="12" required>
-            <small>The other outputs sit at -60 dB.</small>
+            <div class="range-head">
+              <label for="shift_width">How far to the sides</label>
+              <output id="shift_width_out"></output>
+            </div>
+            <input type="range" id="shift_width" name="shift_width" min="10" max="100" step="5">
+            <small>100% is hard left / hard right: only one speaker plays.</small>
           </div>
           <div class="field">
             <div class="range-head">
@@ -284,7 +314,7 @@
             </div>
             <input type="range" id="shift_ms" name="shift_ms" min="300" max="10000" step="100">
           </div>
-          <button type="button" id="testShiftBtn">Test shift</button>
+          <button type="button" id="testShiftBtn" title="Plays a hum that travels across the speakers, on the dashboard with voice enabled">Test shift</button>
         </fieldset>
         <div class="field check">
           <input type="checkbox" id="half_duplex" name="half_duplex">
@@ -328,11 +358,12 @@
 const $ = (id) => document.getElementById(id);
 const TL_KEYS = ["detune_start_ms", "detune_len_ms", "approach_start_ms", "ai_start_ms"];
 const MS_FIELDS = new Set(TL_KEYS);   // stored in ms, shown in seconds
-const FIELDS = ["max_turns", "max_words", "silence_timeout", "cooldown", ...TL_KEYS, "persona", "reverb_mix", "reverb_decay_ms", "shift_enabled", "shift_outputs", "shift_gain_db", "shift_ms", "half_duplex"];
+const FIELDS = ["max_turns", "max_words", "silence_timeout", "cooldown", ...TL_KEYS, "persona", "reverb_mix", "reverb_decay_ms", "shift_enabled", "shift_width", "shift_ms", "half_duplex"];
 const RANGE_LABELS = {
   max_words: (v) => v,
   reverb_mix: (v) => `${v}%`,
   reverb_decay_ms: (v) => `${(v / 1000).toFixed(1)}s`,
+  shift_width: (v) => `${v}%`,
   shift_ms: (v) => `${(v / 1000).toFixed(1)}s`,
 };
 function updateRangeLabels() {
@@ -402,7 +433,7 @@ function renderStatus() {
   $("stateText").textContent = s;
   $("agentMeta").textContent = (status.agent_id ? `agent ${status.agent_id}` : "agent not ready")
     + (status.persona && ["connecting", "active", "ending"].includes(status.state) ? ` · ${status.persona}` : "")
-    + (status.shift_location ? ` · voice at ${status.shift_location}` : "");
+    + (status.voice_clients === 0 ? " · no voice device!" : status.voice_clients > 1 ? ` · ${status.voice_clients} voice devices` : "");
   const busy = ["connecting", "active", "ending", "cooldown", "starting", "error"].includes(s);
   $("simulateBtn").disabled = busy || !status.agent_id;
 
@@ -429,7 +460,9 @@ function renderStatus() {
     cooldownTimer = setInterval(tick, 500);
   } else if (s === "error") {
     $("controlHint").textContent = "Agent setup failed — check the logs, then Resync agent.";
-  } else {
+  } else if (s === "idle" && status.voice_clients === 0) {
+    $("controlHint").textContent = "No dashboard has voice enabled: triggers will be ignored. Turn on 🎙 voice on the washroom machine.";
+  } else if (!["connecting", "active", "ending"].includes(s)) {
     $("controlHint").textContent = "";
   }
 
@@ -437,11 +470,15 @@ function renderStatus() {
   const inConv = (st) => ["connecting", "active", "ending"].includes(st);
   const triggered = prevState === "idle" && s === "connecting";
   const finished = inConv(prevState) && !inConv(s);
+  // Page opened (or reconnected) while a conversation is already waiting: skip the cue, bring the AI in now.
+  const joinedLate = prevState === null && s === "connecting";
   prevState = s;
   if (!tlRun && status.approach_cue) setApproachSrc(status.approach_cue);
   if (triggered) startTimeline(false);
-  else if (finished) { cancelTimeline(); syncMusic(); }
+  else if (finished) { cancelTimeline(); syncMusic(); endVoiceSession("the server moved on"); }
   else syncMusic();
+  if (joinedLate && status.session_id) claimAndRun(status.session_id);
+  renderVoiceBtn();
 }
 
 // ---------- idle music ----------
@@ -767,6 +804,7 @@ function startTimeline(preview) {
   at(tl.detune_start_ms, () => { if (!idleMusic.paused) tapeStop(tl.detune_len_ms); });
   at(tl.approach_start_ms, () => playApproach(approachUrlFor(preview)));
   if (preview) at(tl.ai_start_ms, () => { $("timelineHint").textContent = "AI would connect now (not called in a preview)."; });
+  else { const sid = status.session_id; at(tl.ai_start_ms, () => claimAndRun(sid)); }
   at(run.endMs, finishTimeline);
   $("previewBtn").textContent = preview ? "Cancel preview" : "Cancel (dashboard side)";
   renderTimeline();
@@ -846,10 +884,394 @@ idleMusic.addEventListener("error", () => {
   renderMusicBtn();
 });
 
+// ---------- the entity's voice ----------
+// The ElevenLabs conversation runs in a browser, not on the server (which has no sound card: it may well be
+// on Render). Exactly one dashboard should have 🎙 voice on: the one on the machine in the washroom. When a
+// trigger comes in it runs the timeline like every other dashboard, and at ai_start claims the session from
+// the server, which hands back a signed ElevenLabs URL and the persona's prompt, opening line and voice. The
+// conversation then runs here with the ElevenLabs SDK on this device's mic and speaker: this page counts the
+// visitor's turns, warns the agent before the last one, provokes a silent visitor, mutes the mic for the
+// farewell, and reports every line and event back to the server so the logs and state are the same on every
+// dashboard. Reverb and the stereo "shift" are Web Audio on the SDK's output.
+//
+// "Armed" means the browser will actually let it play: mic permission granted and audio unlocked by a click
+// (browsers block sound until the page has been interacted with). The server only counts armed devices.
+const CLIENT_ID = (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2));
+let voiceOn = localStorage.getItem("voiceDevice") === "on";
+let voiceArmed = false;
+let micGranted = false;
+let voice = null;     // the conversation running on this device, see runVoice()
+
+function sendHello() {
+  if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "hello", client_id: CLIENT_ID, voice: voiceOn && voiceArmed }));
+}
+function renderVoiceBtn() {
+  const b = $("voiceBtn");
+  b.classList.toggle("on", voiceOn && voiceArmed && !voice);
+  b.classList.toggle("arm", voiceOn && !voiceArmed);
+  b.classList.toggle("live", !!voice);
+  b.textContent = voice ? "🎙 the entity speaks here…"
+    : !voiceOn ? "🎙 voice: off"
+    : !voiceArmed ? "🎙 click to arm voice"
+    : "🎙 voice: this device";
+}
+async function micPermission() {
+  if (micGranted) return "granted";
+  try { return (await navigator.permissions.query({ name: "microphone" })).state; } catch { return "prompt"; }
+}
+// Checks whether this page can run the voice right now, and tells the server.
+let micAutoAsked = false;
+async function probeVoice() {
+  if (!voiceOn) {
+    voiceArmed = false;
+    renderVoiceBtn();
+    sendHello();
+    // First visit on this browser: ask instead of guessing.
+    if (localStorage.getItem("voiceDevice") === null && !voice) showGate("ask"); else hideGate();
+    return;
+  }
+  let mic = await micPermission();
+  if (mic !== "granted" && !micAutoAsked && navigator.mediaDevices?.getUserMedia) {
+    // A known voice device: pop Chrome's microphone prompt straight away, no click needed for that one.
+    micAutoAsked = true;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach((t) => t.stop());
+      micGranted = true;
+      mic = "granted";
+    } catch (e) {
+      $("gateHint").textContent = `Microphone: ${e.message}`;
+    }
+  }
+  ensureAudioContext();
+  await wait(250);     // resume() never settles while audio is blocked, so look at the state instead
+  const was = voiceArmed;
+  voiceArmed = mic === "granted" && !!ac && ac.state === "running" && !!navigator.mediaDevices?.getUserMedia;
+  if (!voiceArmed) document.addEventListener("pointerdown", () => probeVoice(), { once: true });
+  if (voiceArmed || voice) hideGate(); else showGate("arm");
+  renderVoiceBtn();
+  if (voiceArmed !== was || !was) sendHello();
+}
+
+// ---- the voice gate popup ----
+function showGate(mode) {
+  const gate = $("voiceGate");
+  gate.dataset.mode = mode;
+  $("gateText").textContent = mode === "ask"
+    ? "This experience needs access to your microphone and speakers."
+    : "This experience needs access to your microphone and speakers. Click anywhere to continue.";
+  gate.hidden = false;
+}
+function hideGate() { $("voiceGate").hidden = true; $("gateHint").textContent = ""; }
+async function gateAccept() {
+  $("gateYes").disabled = true;
+  $("gateHint").textContent = "Asking the browser for the microphone…";
+  try {
+    if (!(await armVoice())) return;
+    voiceOn = true;
+    localStorage.setItem("voiceDevice", "on");
+    await probeVoice();
+    if (!voiceArmed) $("gateHint").textContent = "Sound is still blocked by the browser; click once more.";
+  } finally {
+    $("gateYes").disabled = false;
+  }
+}
+$("gateYes").addEventListener("click", gateAccept);
+// A click on the backdrop counts too: it's the gesture the browser needs.
+$("voiceGate").addEventListener("click", (ev) => { if (ev.target === $("voiceGate")) gateAccept(); });
+// The click on the button: ask for the mic (prompting if needed), unlock audio, and switch voice on.
+async function armVoice() {
+  ensureAudioContext();
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream.getTracks().forEach((t) => t.stop());
+    micGranted = true;
+  } catch (e) {
+    const msg = `Microphone not available: ${e.message}. Voice needs https (or localhost) and mic permission.`;
+    $("controlHint").textContent = msg;
+    $("gateHint").textContent = msg;
+    return false;
+  }
+  return true;
+}
+$("voiceBtn").addEventListener("click", async () => {
+  if (voice) { $("controlHint").textContent = "A conversation is running here; use Stop to end it."; return; }
+  if (voiceOn && voiceArmed) {
+    voiceOn = false;
+    localStorage.setItem("voiceDevice", "off");
+    await probeVoice();
+  } else {
+    await gateAccept();
+  }
+});
+
+// ---- running a conversation ----
+async function claimAndRun(sessionId) {
+  if (voice || !voiceOn || !voiceArmed || !sessionId) return;
+  let claim;
+  try {
+    claim = await api("POST", "/api/session/claim", { session_id: sessionId, client_id: CLIENT_ID });
+  } catch (e) {
+    $("controlHint").textContent = `Voice: ${e.message}`;   // e.g. another dashboard got there first
+    return;
+  }
+  runVoice(claim);
+}
+function endVoiceSession(reason) { voice?.end(reason); }
+
+function runVoice(claim) {
+  const SDK = window.ElevenLabsClient;
+  const S = claim.settings, P = claim.prompts, L = claim.limits;
+  const now = () => performance.now() / 1000;
+  const v = voice = {
+    id: claim.session_id, conv: null, fx: null, timer: null, ended: false, connected: false,
+    started: now(), mode: "listening", lastSpeakEnd: now(), muted: false,
+    spoke: false,          // the entity has spoken since the last visitor turn (or since it arrived)
+    userTurns: 0, silentTurns: 0, lastUserAt: 0, noticeSent: false,
+    finishing: false, finishStarted: 0, farewellSpoke: false,
+    end: endVoice,
+  };
+  renderVoiceBtn();
+  const report = (event) => api("POST", "/api/session/report", { session_id: v.id, client_id: CLIENT_ID, event }).catch(() => {});
+  const log = (text, level = "info") => report({ event: "system", text, level });
+  const idleFor = () => (v.mode === "speaking" ? 0 : now() - v.lastSpeakEnd);
+  // Mic stays muted a little after the entity stops so the room's echo isn't transcribed as the visitor.
+  const echoTail = 0.4 + (S.reverb_mix > 0 ? S.reverb_decay_ms / 1000 * 0.4 : 0);
+
+  if (!SDK) {
+    report({ event: "error", text: "The ElevenLabs browser SDK didn't load (is cdn.jsdelivr.net reachable?)" });
+    endVoice("sdk missing");
+    return;
+  }
+
+  const tap = watchForSdkAudio();
+  SDK.Conversation.startSession({
+    signedUrl: claim.signed_url,
+    connectionType: "websocket",
+    overrides: claim.overrides,
+    dynamicVariables: claim.dynamic_variables,
+    onConnect: ({ conversationId }) => { v.connected = true; report({ event: "connected", conversation_id: conversationId }); },
+    onDisconnect: (d) => endVoice(d.reason === "error" ? `connection error: ${d.message}` : d.reason === "agent" ? "closed by ElevenLabs" : "disconnected"),
+    onError: (message, context) => report({ event: "error", text: `ElevenLabs: ${message}${context ? " " + JSON.stringify(context).slice(0, 300) : ""}` }),
+    onModeChange: ({ mode }) => onMode(mode),
+    onMessage: ({ message, role, source }) => (role === "agent" || source === "ai" ? onEntity(message) : onVisitor(message)),
+    onAgentResponseCorrection: (c) => report({ event: "entity", text: `(interrupted) ${c?.corrected_agent_response ?? ""}` }),
+  }).then((conv) => {
+    if (v.ended) { conv.endSession().catch(() => {}); return; }
+    v.conv = conv;
+    v.fx = tap.attach(S);
+    if (!v.fx && (S.reverb_mix > 0 || S.shift_enabled)) log("Couldn't hook into the SDK's audio output: playing without reverb or shifting", "warn");
+    v.timer = setInterval(tick, 100);
+  }).catch((e) => {
+    tap.cancel();
+    report({ event: "error", text: `Could not start the conversation: ${e?.message || e}` });
+    endVoice("failed to start");
+  });
+
+  function onMode(mode) {
+    if (mode === v.mode) return;
+    v.mode = mode;
+    if (mode === "speaking") { v.spoke = true; if (v.finishing) v.farewellSpoke = true; }
+    else v.lastSpeakEnd = now();
+  }
+  function onEntity(text) {
+    report({ event: "entity", text });
+    // The text arrives as its audio starts streaming, so the glide happens while it speaks.
+    if (text.toLowerCase().includes(P.shift_tag)) shiftVoice();
+  }
+  function onVisitor(text) {
+    // ASR returns "..." for noise (flushes, hand dryers); bracketed text is our own injected prompt echoed back.
+    if (!/\w/.test(text || "") || text.startsWith("[")) return;
+    if (v.finishing) { report({ event: "visitor", text }); return; }
+    countTurn(text);
+  }
+  function countTurn(text) {   // returns true if it was the last turn
+    v.userTurns += 1;
+    v.lastUserAt = now();
+    v.spoke = v.mode === "speaking";   // the reply to this turn is whatever the entity says from here on
+    report({ event: "visitor", text, turn: v.userTurns });
+    if (v.userTurns >= S.max_turns) { beginFarewell(); return true; }
+    return false;
+  }
+  function beginFarewell() {
+    v.finishing = true;
+    v.finishStarted = now();
+    v.farewellSpoke = v.mode === "speaking";
+    setMuted(true);
+    report({ event: "ending" });
+    log("Final turn reached, the entity is saying goodbye");
+  }
+  function onSilentTurn() {
+    v.silentTurns += 1;
+    const sp = P.silence[Math.min(v.silentTurns, P.silence.length) - 1];
+    const last = countTurn(`(silent for ${S.silence_timeout}s)`);
+    log(last ? `Silence #${v.silentTurns} on the final turn, the entity leaves (${sp.mood})`
+             : `Silence #${v.silentTurns}, the entity provokes them (${sp.mood})`);
+    send("user", last ? sp.final_prompt : sp.prompt);
+  }
+  function shiftVoice() {
+    if (!S.shift_enabled) { log("The entity tried to shift, but voice shifting is turned off"); return; }
+    if (!v.fx) { log("The entity tried to shift, but the audio hook isn't active", "warn"); return; }
+    const to = v.fx.shift();
+    log(to ? `The entity shifts to the ${to} speaker over ${(S.shift_ms / 1000).toFixed(1)}s`
+           : "The entity tried to shift while already moving; ignored");
+  }
+  function send(kind, text) {
+    try {
+      if (kind === "contextual") v.conv.sendContextualUpdate(text);
+      else v.conv.sendUserMessage(text);
+    } catch (e) {
+      report({ event: "error", text: `Could not send ${kind} message: ${e.message}` });
+    }
+  }
+  function setMuted(muted) {
+    if (muted === v.muted) return;
+    v.muted = muted;
+    try { v.conv.setMicMuted(muted); } catch {}
+  }
+  function tick() {
+    if (v.ended) return;
+    const t = now();
+    if (t - v.started > L.max_seconds + 10) { log("Max conversation duration reached", "warn"); endVoice("max duration"); return; }
+    if (v.finishing) {
+      if (v.farewellSpoke && idleFor() >= L.farewell_idle_s) { log("The entity has left"); endVoice("the entity left"); return; }
+      if (t - v.finishStarted > L.farewell_timeout_s) { log("Farewell timed out, ending session", "warn"); endVoice("farewell timeout"); return; }
+      return;
+    }
+    if (S.half_duplex) setMuted(idleFor() < echoTail);
+    if (!v.connected) return;
+    // Once the entity has finished replying to turn N-1, warn it that turn N is the last.
+    if (!v.noticeSent && v.userTurns >= S.max_turns - 1 && v.spoke && idleFor() >= L.notice_idle_s) {
+      send("contextual", P.last_turn_notice);
+      v.noticeSent = true;
+      log("Told the entity the visitor's next reply is the last");
+    }
+    if (v.spoke) {
+      const silentFor = Math.min(idleFor(), v.lastUserAt ? t - v.lastUserAt : 1e9);
+      if (silentFor > S.silence_timeout) onSilentTurn();
+    }
+  }
+  function endVoice(reason) {
+    if (v.ended) return;
+    v.ended = true;
+    clearInterval(v.timer);
+    tap.cancel();
+    report({ event: "ended", reason });
+    v.fx?.close();
+    v.conv?.endSession().catch(() => {});
+    if (voice === v) voice = null;
+    renderVoiceBtn();
+  }
+}
+
+// ---- reverb and stereo shifting on the SDK's output ----
+// The SDK plays the agent through a hidden <audio> element it appends to <body>, fed by a MediaStream from
+// its own AudioContext. We catch that element the moment it appears, mute it, and play its stream ourselves
+// through a convolver (reverb) and a stereo panner (the shift). If a future SDK version does it differently,
+// the entity still speaks, just dry and centred, and the logs say so.
+function watchForSdkAudio() {
+  const before = new Set(document.querySelectorAll("audio"));
+  let found = null;
+  const consider = (el) => {
+    if (!found && el instanceof HTMLAudioElement && !before.has(el) && el.srcObject instanceof MediaStream) {
+      found = el;
+      el.muted = true;
+    }
+  };
+  const obs = new MutationObserver((muts) => muts.forEach((m) => m.addedNodes.forEach(consider)));
+  obs.observe(document.body, { childList: true });
+  return {
+    cancel() { obs.disconnect(); },
+    attach(S) {
+      obs.disconnect();
+      if (!found) document.querySelectorAll("audio").forEach(consider);
+      if (!found) return null;
+      try { return buildVoiceFx(found, S); } catch (e) { found.muted = false; return null; }
+    },
+  };
+}
+function buildVoiceFx(el, S) {
+  ensureAudioContext();
+  const ctx = ac;
+  const src = ctx.createMediaStreamSource(el.srcObject);
+  const dry = ctx.createGain(), pan = ctx.createStereoPanner(), out = ctx.createGain();
+  const mix = S.reverb_mix / 100;
+  dry.gain.value = 1 - 0.5 * mix;     // duck the dry signal to leave headroom for the wet one
+  src.connect(dry).connect(pan);
+  if (mix > 0) {
+    const conv = ctx.createConvolver(), wet = ctx.createGain();
+    conv.buffer = reverbImpulse(ctx, S.reverb_decay_ms / 1000);
+    wet.gain.value = mix;
+    src.connect(conv).connect(wet).connect(pan);
+  }
+  pan.connect(out).connect(ctx.destination);
+  const width = S.shift_enabled ? S.shift_width / 100 : 0;
+  let side = -1, moving = false;        // the entity starts on the left
+  pan.pan.value = side * width;
+  return {
+    shift() {   // glide to the other side; returns where it went, or null if it's already moving
+      if (moving) return null;
+      side = -side;
+      moving = true;
+      const t = ctx.currentTime, dur = S.shift_ms / 1000;
+      pan.pan.cancelScheduledValues(t);
+      pan.pan.setValueAtTime(pan.pan.value, t);
+      pan.pan.linearRampToValueAtTime(side * width, t + dur);   // StereoPanner is equal-power, so loudness holds
+      setTimeout(() => { moving = false; }, S.shift_ms);
+      return side < 0 ? "left" : "right";
+    },
+    close() { try { src.disconnect(); out.disconnect(); } catch {} },
+  };
+}
+// Same recipe as the old server-side reverb: exponentially decaying noise with a short pre-delay and damped
+// highs (a hard, tiled room), normalised to unit energy so wet ≈ dry loudness.
+function reverbImpulse(ctx, decay) {
+  const rate = ctx.sampleRate, pre = Math.round(rate * 0.02), n = Math.max(1, Math.round(rate * decay));
+  const buf = ctx.createBuffer(2, pre + n, rate);
+  for (let c = 0; c < 2; c++) {
+    const d = buf.getChannelData(c);
+    let lp = 0, energy = 0;
+    for (let i = 0; i < n; i++) {
+      const x = (Math.random() * 2 - 1) * Math.exp(-6.9 * (i / rate) / decay);   // -60 dB at `decay`
+      lp += 0.25 * (x - lp);
+      d[pre + i] = lp;
+      energy += lp * lp;
+    }
+    const g = 1 / Math.sqrt(energy || 1);
+    for (let i = pre; i < d.length; i++) d[i] *= g;
+  }
+  return buf;
+}
+// Test shift: during a conversation the live voice moves; otherwise a low hum travels across the speakers.
+function testShift({ shift_width, shift_ms }) {
+  if (voice?.fx) { voice.fx.shift(); return; }
+  ensureAudioContext();
+  if (!ac || ac.state !== "running") { $("settingsHint").textContent = "Click the page once so the browser allows sound, then try again."; return; }
+  const width = shift_width / 100, dur = shift_ms / 1000, t = ac.currentTime;
+  const osc = ac.createOscillator(), lp = ac.createBiquadFilter(), g = ac.createGain(), pan = ac.createStereoPanner();
+  osc.type = "sawtooth"; osc.frequency.value = 110;
+  lp.type = "lowpass"; lp.frequency.value = 500;
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(0.2, t + 0.2);
+  g.gain.setValueAtTime(0.2, t + 0.4 + dur);
+  g.gain.linearRampToValueAtTime(0, t + 0.8 + dur);
+  pan.pan.setValueAtTime(-width, t);
+  pan.pan.setValueAtTime(-width, t + 0.4);
+  pan.pan.linearRampToValueAtTime(width, t + 0.4 + dur);
+  osc.connect(lp).connect(g).connect(pan).connect(ac.destination);
+  osc.start(t);
+  osc.stop(t + 0.9 + dur);
+  osc.onended = () => { try { osc.disconnect(); pan.disconnect(); } catch {} };
+}
+function handleCommand(msg) {
+  if (msg.command === "shift" && voiceOn) testShift(msg);
+}
+
 // ---------- websocket ----------
+let ws = null;
 function connect() {
-  const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
-  ws.onopen = () => { $("conn").textContent = "live"; $("conn").classList.remove("off"); };
+  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
+  ws.onopen = () => { $("conn").textContent = "live"; $("conn").classList.remove("off"); sendHello(); };
   ws.onclose = () => {
     $("conn").textContent = "disconnected — retrying";
     $("conn").classList.add("off");
@@ -860,6 +1282,7 @@ function connect() {
     if (msg.type === "history") { entries = msg.entries; renderLog(); }
     else if (msg.type === "log") addEntry(msg);
     else if (msg.type === "status") { status = { ...status, ...msg }; renderStatus(); }
+    else if (msg.type === "command") handleCommand(msg);
   };
 }
 
@@ -937,8 +1360,8 @@ $("settingsForm").addEventListener("submit", async (ev) => {
 $("testShiftBtn").addEventListener("click", async () => {
   $("testShiftBtn").disabled = true;
   try {
-    const r = await api("POST", "/api/shift");
-    $("settingsHint").textContent = `Shifting to ${r.to}…`;
+    await api("POST", "/api/shift");
+    $("settingsHint").textContent = "Shifting on the voice device…";
   } catch (e) {
     $("settingsHint").textContent = `Shift: ${e.message}`;
   } finally {
@@ -976,6 +1399,7 @@ loadSettings().catch(() => {});
 buildTapeControls();
 renderStatus();
 connect();
+probeVoice();   // if this device had voice on, re-arm it (mic permission is remembered; audio needs a click)
 </script>
 </body>
 </html>

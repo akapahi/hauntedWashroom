@@ -4,81 +4,111 @@ A sensor-triggered entity haunting a washroom, out to spook whoever walks in. Wh
 holds a short, sinister speech-to-speech conversation (ElevenLabs Conversational AI), announces that it's
 leaving after N visitor turns (default 3), and goes quiet until the next trigger.
 
-Audio runs on the machine's own mic and speaker. The web dashboard is only for logs, settings and a
-simulate-sensor button.
+The server has no audio of its own, so it can run anywhere, including a free Render web service. All the sound
+(idle music, tape wind-down, approach cue and the entity's voice and mic) comes from the **browser that has the
+dashboard open with 🎙 voice switched on**: a laptop, Pi or old phone in the washroom, plugged into the speakers.
 
 ```
-ESP32 ──POST /api/trigger──▶  FastAPI server (Pi)  ──websocket──▶  ElevenLabs agent
-                                 │   ▲                               (ASR → LLM → TTS)
-                       mic/speaker   └── dashboard (logs, settings, simulate) on :8000
+ESP32 ──POST /api/trigger──▶  FastAPI server (Render)  ──websocket: logs, status──▶  dashboard(s)
+                                 │   signed URL + persona                                 │
+                                 ▼                                                       ▼
+                           ElevenLabs API                    washroom browser: 🎙 voice on, mic + speakers
+                                                                 └──websocket──▶ ElevenLabs agent (ASR → LLM → TTS)
 ```
 
 ## 1. ElevenLabs API key permissions
 
-The key in `.env` (`ELEVENLABS_API_KEY`) needs these permissions (ElevenLabs → Developers → API Keys → edit):
+The key (`ELEVENLABS_API_KEY`) needs these permissions (ElevenLabs → Developers → API Keys → edit):
 
 | Permission | Why |
 |---|---|
-| **ElevenAgents / Conversational AI: Write** | create/update the agent, start conversations |
+| **ElevenAgents / Conversational AI: Write** | create/update the agent, mint signed URLs for conversations |
 | **Voices: Read** | check the configured voice |
 | **Voices: Write** *(optional)* | auto-add a Voice Library voice to your account. Otherwise add it yourself: Voice Library → search the voice ID → "Add to my voices" |
 
 Each persona's voice is set in `app/persona.py`. Voices must be in your account or the public Voice Library
 (the app adds library voices automatically). A persona whose voice can't be found is disabled and logged.
 
-## 2. Install
+## 2. Deploy on Render
 
-**Raspberry Pi / Debian / Ubuntu**
+1. Push this repo to GitHub, then in Render: **New → Blueprint**, pick the repo. [render.yaml](render.yaml)
+   describes the service (Python, `python run.py`, health check on `/api/health`).
+2. Fill in the environment variables it asks for:
+   - `ELEVENLABS_API_KEY` (required)
+   - `TRIGGER_TOKEN`: generated for you; copy it into the ESP32 sketch. Without it anyone with the URL can trigger the entity.
+   - `DASHBOARD_PASSWORD`: generated for you (or set your own). The dashboard asks for it once (any username).
+     Without it anyone with the URL can control the entity and spend your ElevenLabs credits.
+3. Open `https://<your-service>.onrender.com`. On first start the app creates an ElevenLabs agent called
+   "Washroom Entity" (or finds the one it created before, by name and tag). On later starts it pushes the current
+   personas and voices to it.
+
+Things to know about Render:
+- **The disk resets on every deploy.** The agent is found again by name, so no duplicates. Dashboard settings
+  (`data/settings.json`) go back to defaults, though: either add a persistent disk (see the comment in
+  `render.yaml`, paid plans) or re-enter them after a deploy. Set `ELEVENLABS_AGENT_ID` to pin the agent and skip
+  the lookup.
+- **The free plan sleeps** after 15 minutes without requests, and the first trigger after that takes about a
+  minute to be answered, which the ESP32 sketch allows for. Use the *starter* plan on a show night.
+- The server only needs `PORT` (Render sets it) and the variables above.
+
+### Running it locally / on a LAN instead
 
 ```bash
-sudo apt install -y python3-venv python3-dev portaudio19-dev
-python3 -m venv .venv && . .venv/bin/activate
+python3 -m venv .venv && . .venv/bin/activate     # Windows: python -m venv .venv; .venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env   # then put your ELEVENLABS_API_KEY in it
-```
-
-**Windows**
-
-```powershell
-python -m venv .venv; .venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-## 3. Run
-
-```bash
+cp .env.example .env                               # then put your ELEVENLABS_API_KEY in it
 python run.py
 ```
 
-Open `http://<machine-ip>:8000`. On first start the app creates an ElevenLabs agent called
-"Washroom Bhoot" and saves its id to `data/agent.json`. On later starts it pushes the current persona
-and voice to that agent.
+Open `http://<machine-ip>:8000`. Browsers only allow the microphone on `https://` or on `localhost`, so for
+the washroom device either run the browser on the same machine as the server (`http://localhost:8000`) or
+host on Render.
 
-Pick audio devices with `python list_devices.py`, then set `AUDIO_INPUT_DEVICE` / `AUDIO_OUTPUT_DEVICE`
-in `.env` (leave them blank to use the system default).
+## 3. The washroom device
+
+On the machine in the washroom (the one wired to the speakers and a mic):
+
+1. Open the dashboard in Chrome. A popup says the experience needs access to your microphone and speakers;
+   that one click triggers Chrome's microphone prompt and unlocks sound. The 🎙 button in the header turns
+   green: *voice: this device*. On dashboards that should only watch the logs (your phone, a laptop), click
+   the 🎙 button afterwards to turn voice off there; the choice is remembered per browser.
+2. After a reload the voice device asks Chrome for the microphone by itself and shows a *click anywhere to
+   enable sound* popup, because browsers block audio until the page has been clicked once. The server ignores
+   triggers while no armed voice device is connected (the dashboard tells you so).
+3. Keep the tab open and the screen on; the SDK asks for a screen wake lock while a conversation runs.
+
+For an unattended kiosk, start Chrome with `--autoplay-policy=no-user-gesture-required` and allow the
+microphone for the site in its settings, so a reboot doesn't need a click. The device needs internet (it talks to
+ElevenLabs directly) and loads the ElevenLabs browser SDK from jsdelivr.
+
+**Speakers.** The entity's voice is stereo. With *voice shifting* on, it sits on the left channel and, when it
+writes `[shift]`, glides across to the right (and back next time), so put one speaker on each channel in
+different spots of the room. **Test shift** plays a hum that travels across them.
 
 ## 4. ESP32 trigger
 
 ```
-POST http://<pi-ip>:8000/api/trigger?sensor=<optional-name>
-Header (only if TRIGGER_TOKEN is set in .env):  X-Trigger-Token: <token>
+POST https://<your-service>.onrender.com/api/trigger?sensor=<optional-name>
+Header (only if TRIGGER_TOKEN is set):  X-Trigger-Token: <token>
 
 200 {"accepted": true,  "reason": "started", "state": "connecting"}
-200 {"accepted": false, "reason": "conversation already in progress" | "cooling down (7s left)" | "agent not ready", ...}
+200 {"accepted": false, "reason": "conversation already in progress" | "cooling down (7s left)" | "agent not ready"
+                                  | "no dashboard with voice enabled is connected", ...}
 401 bad token
 ```
 
 The server ignores triggers while a conversation or cooldown is running, so the ESP32 can fire on every
 detection. The trigger URL is printed in the logs on startup. A ready-made sketch is in
-[esp32/entity_trigger/entity_trigger.ino](esp32/entity_trigger/entity_trigger.ino): call `triggerEntity()`
-from your sensor code.
+[esp32/entity_trigger/entity_trigger.ino](esp32/entity_trigger/entity_trigger.ino): set the URL and token and call
+`triggerEntity()` from your sensor code (it speaks https to Render).
 
-Quick test without hardware: `curl -X POST http://localhost:8000/api/trigger`
+Quick test without hardware: `curl -X POST -H "X-Trigger-Token: <token>" https://<your-service>.onrender.com/api/trigger`
 
 ## 5. Dashboard
 
 - **Simulate sensor** does the same thing as an ESP32 trigger.
-- **Stop / skip cooldown** ends the current conversation immediately, or skips the cooldown.
+- **Stop / skip cooldown** ends the current conversation immediately (on whichever device is running it), or skips the cooldown.
+- **🎙 voice** (header): whether *this* browser runs the entity's voice and mic. See section 3.
 - **Settings** apply to the next conversation and are saved in `data/settings.json`:
   - *Turns per conversation*: how many times the visitor speaks before the entity leaves.
   - *Reply length*: maximum words per entity reply.
@@ -90,54 +120,38 @@ Quick test without hardware: `curl -X POST http://localhost:8000/api/trigger`
       wow and flutter, muffles into a resonant howl, distorts, then stutters and dies).
     - *Approach starts*: `res/<Persona name>/approach.wav` (folder matched case-insensitively, the
       persona id works too) starts playing. Overlapping the tape's tail is the default.
-    - *AI connects*: the server contacts the ElevenLabs agent; the entity speaks a second or two later.
+    - *AI connects*: the voice device asks the server for a signed URL and opens the ElevenLabs conversation;
+      the entity speaks a second or two later. If no voice device picks it up within 20 s, the trigger is
+      written off and the entity cools down.
     - **Preview timeline** runs the tape and approach cue with the values in the form (unsaved too)
       without calling the AI; a playhead shows where you are. Real triggers use the saved values.
       Stop, or anything that ends the conversation, cancels the dashboard side too.
 
-    For now the idle loop, the tape wind-down and the approach cue all play **in the browser** that has
-    the dashboard open; only the entity's own voice comes from the server's `AUDIO_OUTPUT_DEVICE`.
-    The plan is to move all of it server-side later (`play_wav` in `app/audio.py` is the start).
+    Every open dashboard plays the idle loop, the tape wind-down and the approach cue for itself (mute the
+    ♪ button on the ones that shouldn't); only the voice device plays the entity.
   - *Persona*: a specific character, or random each conversation.
-  - *Voice shifting*: see below. **Test shift** moves its voice once, without a conversation.
-  - *Reverb amount / room size*: echo added to the entity's voice on this machine before it reaches the
+  - *Reverb amount / room size*: echo added to the entity's voice on the voice device before it reaches the
     speaker. 0% turns it off.
-  - *Half-duplex*: mutes the mic while the entity talks. Keep this on with an open speaker, otherwise the
-    entity hears itself.
+  - *Voice shifting*: see section 3. *How far to the sides* is the stereo width (100% = one speaker at a time).
+  - *Half-duplex*: mutes the mic while the entity talks (plus the reverb tail). Keep this on with an open
+    speaker, otherwise the entity hears itself.
 - **Idle music**: `res/Infinite_Dancefloor.mp3` loops on the dashboard page whenever the state is `idle`.
   A trigger starts the timeline (tape wind-down, approach cue); any other change of state pauses it. The ♪ button in the header turns it
   off (remembered in the browser); browsers block autoplay until you click the page once, and the button
-  says so. The track plays on whatever device has the dashboard open, not through the entity's speaker.
+  says so.
 - **Tape wind-down** panel: sliders for every part of the effect (duration, when it starts dying, how
   slow it sags, wow and flutter rate/depth, where the filter closes to, resonance, distortion drive,
   dropout and stutter odds). **Test tape** plays the music for 2 s and winds it down without triggering
   the entity. These live in the browser's localStorage, not on the server, so each dashboard device
   keeps its own.
 - **Logs** stream live: triggers, what the visitor said (with the turn number), what the entity said,
-  system events and errors. They are also written to `logs/entity.log`.
-
-## Voice shifting (Voicemeeter Banana, Windows)
-
-The entity can move around the room. When its reply starts with `[shift]` (the persona tells it to use it
-sparingly, and to hint at the move without announcing it), the app crossfades Voicemeeter output bus gains so
-its voice glides from one speaker to another. The output it's at sits at *Gain where it is*; the others sit
-at -60 dB. The fade is equal-power, so the loudness stays steady while it moves.
-
-Setup:
-1. Put a speaker on each output you list (default `A1,A2`), in different spots in the room.
-2. Send the app's audio into Voicemeeter: run `python list_devices.py` and set `AUDIO_OUTPUT_DEVICE` to a
-   Voicemeeter input device (e.g. "Voicemeeter Input" / "VoiceMeeter VAIO").
-3. In Voicemeeter, route that input strip to **all** of the listed outputs (A1 and A2 lit).
-4. Start the app and press **Test shift** on the dashboard.
-
-The app controls those buses' gains, so don't use them for other audio. On startup it places the entity at the
-first output. Shifting needs Voicemeeter, so it is Windows-only; elsewhere `[shift]` is only logged.
+  system events and errors, from whichever device is running the voice. They are also written to `logs/entity.log`.
 
 ## How a conversation ends
 
 1. The entity speaks a random opening line from `app/persona.py`.
 2. Each visitor utterance counts as one turn. Noise transcripts like "..." are ignored.
-3. After the entity finishes replying to turn N-1, the app sends the agent a contextual update saying the
+3. After the entity finishes replying to turn N-1, the voice device sends the agent a contextual update saying the
    next turn is the last.
 4. On turn N the mic is muted, the entity replies and says it's leaving, and the session closes once the
    speaker has gone quiet.
@@ -147,7 +161,7 @@ first output. Shifting needs Voicemeeter, so it is Windows-only; elsewhere `[shi
 
 ## Personas
 
-`app/persona.py` holds a list of personas: currently the Washroom Entity, Vecna and Pennywise. Each has its own
+`app/persona.py` holds a list of personas: currently Manjulika, Pennywise and Jigsaw. Each has its own
 character prompt, voice ID and opening lines. The rules they all share are appended to every prompt: reply
 format, `[shift]`, boundaries, the escalating reaction to silence, and leaving. Each conversation sends the
 chosen persona's prompt, opening line and voice to the agent as overrides, so all of them use the same LLM and
@@ -155,37 +169,19 @@ the TTS settings configured on the ElevenLabs website. To add a character, appen
 
 ## Customising the entity
 
-Edit `app/persona.py` (characters, opening lines, shared rules, farewell notice), then restart the server or click
-**Resync agent**. The LLM defaults to `claude-sonnet-5`. Override it with `ENTITY_LLM` in `.env` using any
+Edit `app/persona.py` (characters, opening lines, shared rules, farewell notice), then redeploy or click
+**Resync agent**. The LLM defaults to `claude-sonnet-5`. Override it with `ENTITY_LLM` using any
 model ElevenLabs agents support, for example `gpt-4o-mini` or `claude-haiku-4-5`.
-
-## Run on boot (Raspberry Pi, systemd)
-
-```ini
-# /etc/systemd/system/washroom-entity.service
-[Unit]
-Description=Washroom Bhoot
-After=network-online.target sound.target
-Wants=network-online.target
-
-[Service]
-User=pi
-WorkingDirectory=/home/pi/washroom_el
-ExecStart=/home/pi/washroom_el/.venv/bin/python run.py
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable it with `sudo systemctl enable --now washroom-entity`. Run it as the desktop user (or add that user
-to the `audio` group) so it can open the sound devices.
 
 ## Troubleshooting
 
-- **`Invalid sample rate` / `-9997` on the Pi**: some USB mics can't do 16 kHz natively. Use the ALSA
-  `default`/`pulse` device (it resamples) instead of a raw `hw:` device index.
+- **"no dashboard with voice enabled is connected"**: on the washroom device answer the popup (or click 🎙 voice),
+  allow the mic, and click the page once. The header shows *voice: this device* when it's ready.
+- **"No dashboard picked up the conversation"**: the voice device lost its connection or wasn't armed in time.
+  Check its 🎙 button and that the tab is still open.
 - **The entity answers itself / turns get used up**: turn on half-duplex, point the speaker away from the
   mic, or lower the speaker volume.
+- **"Couldn't hook into the SDK's audio output"**: a newer SDK build changed how it plays audio; the entity still
+  speaks, without reverb or shifting. Pin the version in `static/index.html` back to `1.27.0`.
 - **`missing the permission convai_write`**: see section 1.
-- **No sound**: run `python list_devices.py` and set `AUDIO_OUTPUT_DEVICE`.
+- **Microphone not available**: the dashboard must be on `https://` (Render) or `localhost`, and the mic allowed for the site.

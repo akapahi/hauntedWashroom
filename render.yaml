@@ -1,0 +1,31 @@
+# Render Blueprint: https://render.com/docs/blueprint-spec
+# New > Blueprint in the Render dashboard, point it at this repo, then fill in ELEVENLABS_API_KEY.
+services:
+  - type: web
+    name: washroom-bhoot
+    runtime: python
+    # The free plan sleeps after 15 minutes without requests, and the first trigger after that takes ~1 minute
+    # to wake it. Use "starter" for a show night.
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python run.py
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: ELEVENLABS_API_KEY
+        sync: false            # paste it in the Render dashboard
+      - key: TRIGGER_TOKEN
+        generateValue: true    # copy it into the ESP32 sketch
+      - key: DASHBOARD_PASSWORD
+        generateValue: true    # or set your own; the dashboard asks for it (any username)
+      # - key: ELEVENLABS_AGENT_ID
+      #   sync: false          # optional: pin the agent instead of finding it by name on each boot
+      # - key: ENTITY_LLM
+      #   value: claude-sonnet-5
+    # The disk resets on every deploy. The agent is found again by name, but dashboard settings
+    # (data/settings.json) go back to defaults unless you add a persistent disk (paid plans):
+    # disk:
+    #   name: data
+    #   mountPath: /opt/render/project/src/data
+    #   sizeGB: 1

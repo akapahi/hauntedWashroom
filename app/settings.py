@@ -18,19 +18,19 @@ class Settings:
     max_words: int = 25         # upper bound on words per entity reply
     silence_timeout: int = 15   # seconds of visitor silence before the entity provokes them (uses up a turn)
     cooldown: int = 10          # seconds after a conversation during which triggers are ignored
-    # Timeline, in ms after the trigger. The dashboard plays the idle loop, the tape wind-down and the
-    # approach cue in the browser (for now); the server only acts on ai_start_ms.
+    # Timeline, in ms after the trigger. The dashboards play the idle loop, the tape wind-down and the
+    # approach cue; the one with voice enabled connects the AI at ai_start_ms.
     detune_start_ms: int = 0        # idle music starts winding down like a tape
     detune_len_ms: int = 7000       # how long the wind-down takes
     approach_start_ms: int = 6000   # res/<Persona>/approach.wav starts (overlapping the tape's tail by default)
-    ai_start_ms: int = 20000        # the server connects to ElevenLabs; the entity speaks a second or two later
+    ai_start_ms: int = 20000        # the voice dashboard connects to ElevenLabs; the entity speaks a second or two later
     persona: str = "random"     # persona id from persona.py, or "random" (voices live in persona.py)
+    # The entity's voice plays in the browser that has voice enabled; these shape it there.
     half_duplex: bool = True    # mute the mic while the entity speaks (prevents speaker echo)
     reverb_mix: int = 25        # reverb wet level, % (0 = off)
     reverb_decay_ms: int = 1500 # reverb decay time (room size)
-    shift_enabled: bool = True  # let the entity move its voice between Voicemeeter outputs with [shift]
-    shift_outputs: str = "A1,A2"  # Voicemeeter output buses = spots in the room
-    shift_gain_db: int = 0      # gain of the output the entity is at (the others sit at -60 dB)
+    shift_enabled: bool = True  # let the entity move its voice between the left and right speaker with [shift]
+    shift_width: int = 100      # how far to the sides it goes, % (100 = hard left / hard right)
     shift_ms: int = 2500        # how long the voice takes to travel
 
 
@@ -46,7 +46,7 @@ LIMITS = {
     "ai_start_ms": (0, 60000),
     "reverb_mix": (0, 100),
     "reverb_decay_ms": (300, 4000),
-    "shift_gain_db": (-60, 12),
+    "shift_width": (10, 100),
     "shift_ms": (300, 10000),
 }
 
@@ -94,10 +94,6 @@ class SettingsStore:
                     raise ValueError(f"{key} must be between {lo} and {hi}")
             elif types[key] is bool or types[key] == "bool":
                 value = bool(value)
-            elif key == "shift_outputs":
-                from .shifter import parse_outputs  # local import: shifter -> logbus -> settings
-
-                value = ",".join(parse_outputs(str(value)))
             elif key == "persona":
                 from .persona import PERSONA_BY_ID, RANDOM
 

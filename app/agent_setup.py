@@ -12,6 +12,7 @@ from .settings import load_agent_id, save_agent_id
 LLM = os.getenv("ENTITY_LLM", "claude-sonnet-5")
 TEMPERATURE = 0.9
 MAX_CONVERSATION_SECONDS = 300
+AGENT_TAG = "washroom-entity"
 
 
 def ensure_voice(client: ElevenLabs, voice_id: str) -> str:
@@ -39,6 +40,27 @@ def ensure_voice(client: ElevenLabs, voice_id: str) -> str:
         return voice_id
     bus.emit("system", f"Added Voice Library voice '{match.name}' to your ElevenLabs account")
     return added.voice_id or voice_id
+
+
+def signed_url(client: ElevenLabs, agent_id: str) -> str:
+    """A short-lived URL the browser uses to open the conversation websocket without seeing the API key."""
+    return client.conversational_ai.conversations.get_signed_url(agent_id=agent_id).signed_url
+
+
+def find_agent(client: ElevenLabs) -> str | None:
+    """The agent this app created earlier, found by name and tag.
+
+    Hosts like Render reset the disk on every deploy, so data/agent.json may be gone; without this the app
+    would create a fresh agent each time.
+    """
+    try:
+        page = client.conversational_ai.agents.list(search=persona.AGENT_NAME, page_size=30)
+    except ApiError:
+        return None
+    for agent in page.agents:
+        if agent.name == persona.AGENT_NAME and AGENT_TAG in (agent.tags or []):
+            return agent.agent_id
+    return None
 
 
 def describe_error(e: Exception) -> str:
@@ -115,6 +137,11 @@ def sync_agent(client: ElevenLabs) -> tuple[str, dict[str, str]]:
     config = _conversation_config(base, voices[base.id])
     names = ", ".join(persona.PERSONA_BY_ID[i].name for i in voices)
     agent_id = load_agent_id()
+    if not agent_id:
+        agent_id = find_agent(client)
+        if agent_id:
+            bus.emit("system", f"Found the existing agent {agent_id} on ElevenLabs (set ELEVENLABS_AGENT_ID to skip this lookup)")
+            save_agent_id(agent_id)
 
     if agent_id:
         try:
@@ -139,7 +166,7 @@ def sync_agent(client: ElevenLabs) -> tuple[str, dict[str, str]]:
         conversation_config=config,
         platform_settings=PLATFORM_SETTINGS,
         name=persona.AGENT_NAME,
-        tags=["washroom-entity"],
+        tags=[AGENT_TAG],
     )
     save_agent_id(created.agent_id)
     bus.emit("system", f"Created ElevenLabs agent {created.agent_id} (personas: {names})")

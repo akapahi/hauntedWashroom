@@ -40,6 +40,10 @@ class LogBus:
             snapshot = {"type": "status", **self._status}
         self._broadcast(snapshot)
 
+    def command(self, name: str, **data):
+        """A one-off instruction for the connected dashboards (e.g. a test shift). Not kept in the history."""
+        self._broadcast({"type": "command", "command": name, **data})
+
     def snapshot(self) -> tuple[list[dict], dict]:
         with self._lock:
             return list(self._history), {"type": "status", **self._status}
