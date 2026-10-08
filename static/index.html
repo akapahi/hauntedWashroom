@@ -272,13 +272,13 @@
               <input type="number" id="approach_start_ms" name="approach_start_ms" min="0" max="60" step="0.1" required>
             </div>
             <div class="field">
-              <label for="ai_start_ms">AI connects</label>
-              <input type="number" id="ai_start_ms" name="ai_start_ms" min="0" max="60" step="0.1" required>
+              <label for="ai_lead_ms">AI connects before approach ends</label>
+              <input type="number" id="ai_lead_ms" name="ai_lead_ms" min="0" max="30" step="0.1" required>
             </div>
           </div>
           <div class="timeline" id="timeline"></div>
           <button type="button" id="previewBtn">Preview timeline</button>
-          <small id="timelineHint">Preview runs the tape and the approach cue in this browser with the values above (even unsaved), without the AI. Real triggers use the saved values. The approach cue is res/&lt;Persona&gt;/approach.wav. At "AI connects" the dashboard with voice enabled starts the ElevenLabs conversation.</small>
+          <small id="timelineHint">Preview runs the tape and the approach cue in this browser with the values above (even unsaved), without the AI. Real triggers use the saved values. The approach cue is res/&lt;Persona&gt;/approach.wav. The dashboard with voice enabled starts the ElevenLabs conversation the given time before the cue ends, whatever the cue's length.</small>
         </fieldset>
         <div class="field">
           <div class="range-head">
@@ -356,7 +356,7 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-const TL_KEYS = ["detune_start_ms", "detune_len_ms", "approach_start_ms", "ai_start_ms"];
+const TL_KEYS = ["detune_start_ms", "detune_len_ms", "approach_start_ms", "ai_lead_ms"];
 const MS_FIELDS = new Set(TL_KEYS);   // stored in ms, shown in seconds
 const FIELDS = ["max_turns", "max_words", "silence_timeout", "cooldown", ...TL_KEYS, "persona", "reverb_mix", "reverb_decay_ms", "shift_enabled", "shift_width", "shift_ms", "half_duplex"];
 const RANGE_LABELS = {
@@ -503,7 +503,9 @@ function renderMusicBtn() {
 // ---------- tape wind-down, approach cue, timeline ----------
 // All of this audio runs in the browser for now: the idle loop, the tape wind-down and the approach
 // cue. The AI's voice is the one thing still coming out of the server's speaker. The timeline (server
-// settings, seconds after the trigger) says when each piece happens; the server only acts on ai_start.
+// settings, seconds after the trigger) says when each piece happens. The AI connects ai_lead_ms before the
+// approach cue ends, so that moment follows the cue's length: the server works it out from the WAV file and
+// sends it with the trigger (status.ai_start_ms); previews compute it here from the loaded cue.
 //
 // Tape wind-down: over several seconds the music slowly detunes (a tape reel losing speed, with a slow
 // wow and a faster flutter on top), gets muffled and resonant (a lowpass closing with rising Q), and
@@ -733,16 +735,22 @@ function approachSeconds() {
 
 // ---- timeline ----
 // t=0 is the trigger (for a real run, the moment the state turns "connecting"). Each event is a timer;
-// the server runs its own copy of the ai_start wait, so the two sides agree to within WebSocket latency.
+// the server waits for the claim until ai_start plus a grace period, so the two sides agree to within WebSocket latency.
 const TL_LABEL_W = 78;   // label column + gap, for the playhead
 let savedSettings = null;
 let tlRun = null;        // { t0, timers, raf, preview, tl, endMs }
 
+// AI start from the lead and the cue's length (the server's own figure wins for a real run).
+function withAiStart(tl, fromServer) {
+  const ap = approachSeconds();
+  const ai = fromServer ?? (ap == null ? tl.approach_start_ms : Math.max(0, tl.approach_start_ms + Math.round(ap * 1000) - tl.ai_lead_ms));
+  return { ...tl, ai_start_ms: ai, ai_known: fromServer != null || ap != null };
+}
 function formTimeline() {
-  return Object.fromEntries(TL_KEYS.map((k) => [k, Math.max(0, Math.round(Number($(k).value) * 1000) || 0)]));
+  return withAiStart(Object.fromEntries(TL_KEYS.map((k) => [k, Math.max(0, Math.round(Number($(k).value) * 1000) || 0)])));
 }
 function savedTimeline() {
-  return savedSettings ? Object.fromEntries(TL_KEYS.map((k) => [k, savedSettings[k]])) : formTimeline();
+  return savedSettings ? withAiStart(Object.fromEntries(TL_KEYS.map((k) => [k, savedSettings[k]])), status.ai_start_ms) : formTimeline();
 }
 function timelineSpanMs(tl) {
   const ap = (approachSeconds() ?? 5) * 1000;
@@ -759,7 +767,7 @@ function renderTimeline() {
   const rows = [
     ["Detune", tl.detune_start_ms, tl.detune_len_ms, "tl-detune", sec(tl.detune_len_ms)],
     ["Approach", tl.approach_start_ms, (ap ?? 5) * 1000, ap ? "tl-approach" : "tl-approach tl-unknown", ap ? sec(ap * 1000) : "length unknown"],
-    ["AI", tl.ai_start_ms, 0, "tl-ai", `connects at ${sec(tl.ai_start_ms)}`],
+    ["AI", tl.ai_start_ms, 0, "tl-ai", tl.ai_known ? `connects at ${sec(tl.ai_start_ms)}` : `${sec(tl.ai_lead_ms)} before the cue ends`],
   ];
   for (const [name, startMs, lenMs, cls, label] of rows) {
     const row = document.createElement("div"); row.className = "tl-row";

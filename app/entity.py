@@ -1,7 +1,7 @@
 """Runs one entity conversation per sensor trigger. The voice itself runs in a browser, not here.
 
 Flow: trigger -> state "connecting" (every open dashboard winds the idle music down and plays
-res/<Persona>/approach.wav on its own timeline) -> at ai_start_ms the dashboard with voice enabled claims the
+res/<Persona>/approach.wav on its own timeline) -> ai_lead_ms before the cue ends, the dashboard with voice enabled claims the
 session (POST /api/session/claim) and gets a signed ElevenLabs URL plus the persona overrides -> it runs the
 conversation with the ElevenLabs JS SDK on its own mic and speaker, counts turns, tells the agent when the
 next turn is the last, mutes the mic for the farewell, and reports everything here (POST /api/session/report)
@@ -16,6 +16,7 @@ import random
 import secrets
 import threading
 import time
+import wave
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import quote
@@ -42,6 +43,7 @@ class Session:
     character: persona.Persona
     opening: str
     source: str
+    ai_start_ms: int                    # ms after the trigger when the dashboard connects the AI
     started: float = field(default_factory=time.monotonic)
     claimed_by: str | None = None       # dashboard client id that runs the voice
     conversation_id: str | None = None
@@ -66,6 +68,25 @@ def approach_cue_url(character: persona.Persona) -> str | None:
     """The cue as the dashboard fetches it (/res/<folder>/approach.wav), or None."""
     cue = approach_cue(character)
     return "/res/" + quote(cue.relative_to(RES_DIR).as_posix()) if cue else None
+
+
+def approach_cue_seconds(character: persona.Persona) -> float | None:
+    cue = approach_cue(character)
+    if not cue:
+        return None
+    try:
+        with wave.open(str(cue), "rb") as wf:
+            return wf.getnframes() / wf.getframerate()
+    except (wave.Error, OSError, ZeroDivisionError):
+        return None
+
+
+def ai_start_ms(settings: Settings, character: persona.Persona) -> int:
+    """When the AI connects: ai_lead_ms before the approach cue ends (at the cue's start if there is no cue)."""
+    seconds = approach_cue_seconds(character)
+    if seconds is None:
+        return settings.approach_start_ms
+    return max(0, settings.approach_start_ms + round(seconds * 1000) - settings.ai_lead_ms)
 
 
 def _text(value, limit: int = 2000) -> str:
@@ -152,6 +173,7 @@ class EntityController:
                 character=character,
                 opening=random.choice(character.opening_lines),
                 source=source,
+                ai_start_ms=ai_start_ms(settings, character),
             )
             self._set_state("connecting")
             threading.Thread(target=self._run, args=(self.session,), daemon=True, name="entity-session").start()
@@ -279,9 +301,10 @@ class EntityController:
                 bus.emit("system", f"No approach cue for {session.character.name} (res/{session.character.name}/approach.wav)", "warn")
 
             # Timeline. The dashboards saw the state turn "connecting" and run the tape wind-down and the
-            # approach cue; the one with voice enabled brings the AI in at ai_start_ms.
-            hold = s.ai_start_ms / 1000
-            bus.emit("system", f"Timeline: the dashboard connects the AI at {hold:.1f}s (tape, approach cue and voice all play there)")
+            # approach cue; the one with voice enabled brings the AI in at session.ai_start_ms (sent in the status).
+            hold = session.ai_start_ms / 1000
+            bus.emit("system", f"Timeline: the dashboard connects the AI at {hold:.1f}s, "
+                     f"{s.ai_lead_ms / 1000:.1f}s before the approach cue ends (tape, cue and voice all play there)")
             deadline = time.monotonic() + hold + CLAIM_GRACE_SECONDS
             while not session.claimed.is_set():
                 if self._stop_event.is_set():
@@ -331,7 +354,7 @@ class EntityController:
         self._publish_status()
 
     def _publish_status(self):
-        extra = {"turn": 0} if self.state == "connecting" else {}
+        extra = {"turn": 0, "ai_start_ms": self.session.ai_start_ms} if self.state == "connecting" and self.session else {}
         bus.set_status(
             state=self.state,
             max_turns=self.store.get().max_turns,

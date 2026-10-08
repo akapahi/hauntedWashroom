@@ -19,11 +19,11 @@ class Settings:
     silence_timeout: int = 15   # seconds of visitor silence before the entity provokes them (uses up a turn)
     cooldown: int = 10          # seconds after a conversation during which triggers are ignored
     # Timeline, in ms after the trigger. The dashboards play the idle loop, the tape wind-down and the
-    # approach cue; the one with voice enabled connects the AI at ai_start_ms.
+    # approach cue; the one with voice enabled connects the AI ai_lead_ms before the cue ends.
     detune_start_ms: int = 0        # idle music starts winding down like a tape
     detune_len_ms: int = 3000       # how long the wind-down takes
     approach_start_ms: int = 2000   # res/<Persona>/approach.wav starts (overlapping the tape's tail by default)
-    ai_start_ms: int = 13000        # the voice dashboard connects to ElevenLabs; the entity speaks a second or two later
+    ai_lead_ms: int = 1000          # the voice dashboard connects to ElevenLabs this long before the approach cue ends
     persona: str = "random"     # persona id from persona.py, or "random" (voices live in persona.py)
     # The entity's voice plays in the browser that has voice enabled; these shape it there.
     half_duplex: bool = True    # mute the mic while the entity speaks (prevents speaker echo)
@@ -43,7 +43,7 @@ LIMITS = {
     "detune_start_ms": (0, 60000),
     "detune_len_ms": (500, 30000),
     "approach_start_ms": (0, 60000),
-    "ai_start_ms": (0, 60000),
+    "ai_lead_ms": (0, 30000),
     "reverb_mix": (0, 100),
     "reverb_decay_ms": (300, 4000),
     "shift_width": (10, 100),

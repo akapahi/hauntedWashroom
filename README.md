@@ -120,9 +120,10 @@ Quick test without hardware: `curl -X POST -H "X-Trigger-Token: <token>" https:/
       wow and flutter, muffles into a resonant howl, distorts, then stutters and dies).
     - *Approach starts*: `res/<Persona name>/approach.wav` (folder matched case-insensitively, the
       persona id works too) starts playing. Overlapping the tape's tail is the default.
-    - *AI connects*: the voice device asks the server for a signed URL and opens the ElevenLabs conversation;
-      the entity speaks a second or two later. If no voice device picks it up within 20 s, the trigger is
-      written off and the entity cools down.
+    - *AI connects before approach ends*: the voice device asks the server for a signed URL and opens the
+      ElevenLabs conversation this long before the approach cue finishes (default 1 s), so the moment follows
+      the cue's length; the entity speaks a second or two later. If no voice device picks it up within 20 s,
+      the trigger is written off and the entity cools down.
     - **Preview timeline** runs the tape and approach cue with the values in the form (unsaved too)
       without calling the AI; a playhead shows where you are. Real triggers use the saved values.
       Stop, or anything that ends the conversation, cancels the dashboard side too.
