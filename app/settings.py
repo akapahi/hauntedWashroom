@@ -21,9 +21,9 @@ class Settings:
     # Timeline, in ms after the trigger. The dashboards play the idle loop, the tape wind-down and the
     # approach cue; the one with voice enabled connects the AI at ai_start_ms.
     detune_start_ms: int = 0        # idle music starts winding down like a tape
-    detune_len_ms: int = 7000       # how long the wind-down takes
-    approach_start_ms: int = 6000   # res/<Persona>/approach.wav starts (overlapping the tape's tail by default)
-    ai_start_ms: int = 20000        # the voice dashboard connects to ElevenLabs; the entity speaks a second or two later
+    detune_len_ms: int = 3000       # how long the wind-down takes
+    approach_start_ms: int = 2000   # res/<Persona>/approach.wav starts (overlapping the tape's tail by default)
+    ai_start_ms: int = 13000        # the voice dashboard connects to ElevenLabs; the entity speaks a second or two later
     persona: str = "random"     # persona id from persona.py, or "random" (voices live in persona.py)
     # The entity's voice plays in the browser that has voice enabled; these shape it there.
     half_duplex: bool = True    # mute the mic while the entity speaks (prevents speaker echo)

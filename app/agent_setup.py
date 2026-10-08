@@ -77,7 +77,7 @@ def describe_error(e: Exception) -> str:
 PLATFORM_SETTINGS = {
     "overrides": {
         "conversation_config_override": {
-            "agent": {"first_message": True, "prompt": {"prompt": True}},
+            "agent": {"first_message": True, "prompt": {"prompt": True}, "language": True},
             "tts": {"voice_id": True},
         }
     }
@@ -103,6 +103,12 @@ def _conversation_config(base: persona.Persona, voice_id: str) -> dict:
                 "llm": LLM,
                 "temperature": TEMPERATURE,
             },
+        },
+        # Every language a persona speaks must be enabled on the agent ("additional languages") before a
+        # conversation may switch to it; the switch itself is the per-conversation language override.
+        "language_presets": {
+            lang: {"overrides": {"agent": {"language": lang}}}
+            for lang in sorted({p.language for p in persona.PERSONAS if p.language != "en"})
         },
         # Only the voice is managed here. The TTS model (eleven_v3_conversational), expressive mode, audio
         # tags and voice settings are configured on the ElevenLabs website; the update is a PATCH, so

@@ -192,7 +192,7 @@ class EntityController:
                 "agent": {
                     "prompt": {"prompt": persona.system_prompt(session.character).replace("{{max_words}}", str(s.max_words))},
                     "firstMessage": session.opening,
-                    "language": "en",
+                    "language": session.character.language,
                 },
                 "tts": {"voiceId": self.persona_voices[session.character.id]},
             },
