@@ -70,7 +70,7 @@ async def lifespan(app: FastAPI):
             bus.emit("system", "DASHBOARD_PASSWORD is not set: anyone with the URL can control the entity", "warn")
         if not TRIGGER_TOKEN:
             bus.emit("system", "TRIGGER_TOKEN is not set: anyone with the URL can trigger the entity", "warn")
-    bus.emit("system", "The entity's voice plays on the dashboard with voice enabled; open it on the washroom machine")
+    bus.emit("system", "Every dashboard with voice enabled gets its own entity; the sensor wakes all of them at once")
     entity = EntityController(store)
     # Sync the agent in the background so the dashboard is reachable even if ElevenLabs is slow/unreachable.
     threading.Thread(target=_safe_sync, daemon=True).start()
@@ -139,7 +139,7 @@ async def index():
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "state": entity.state if entity else "starting"}
+    return {"ok": True, "agent": entity.agent_state if entity else "starting"}
 
 
 @app.post("/api/trigger")
@@ -148,35 +148,53 @@ async def trigger(request: Request, sensor: str = "esp32", token: str = ""):
         supplied = request.headers.get("X-Trigger-Token", token)
         if not secrets.compare_digest(supplied, TRIGGER_TOKEN):
             raise HTTPException(status_code=401, detail="bad trigger token")
-    accepted, reason = entity.trigger(f"sensor '{sensor}'")
-    return {"accepted": accepted, "reason": reason, "state": entity.state}
+    # The sensor wakes the entity on every dashboard that has voice enabled, each in its own conversation.
+    results = entity.trigger_all(f"sensor '{sensor}'")
+    started = [cid for cid, (ok, _) in results.items() if ok]
+    reason = (f"started on {len(started)} dashboard(s)" if started
+              else next((r for _, r in results.values()), "no dashboard with voice enabled is connected"))
+    return {"accepted": bool(started), "reason": reason, "clients": {cid: r for cid, (_, r) in results.items()}}
+
+
+def _client_id(body: dict) -> str:
+    client_id = body.get("client_id")
+    if not isinstance(client_id, str):
+        raise HTTPException(status_code=400, detail="client_id is required")
+    return client_id
 
 
 @app.post("/api/simulate")
-async def simulate():
-    accepted, reason = entity.trigger("dashboard (simulated sensor)")
-    return {"accepted": accepted, "reason": reason, "state": entity.state}
+async def simulate(body: dict):
+    """The dashboard's own button: starts a conversation on that dashboard only."""
+    client_id = _client_id(body)
+    accepted, reason = entity.trigger(client_id, "dashboard (simulated sensor)")
+    return {"accepted": accepted, "reason": reason, "state": entity.states().get(client_id)}
 
 
 @app.post("/api/stop")
-async def stop():
-    entity.stop()
+async def stop(body: dict):
+    entity.stop(_client_id(body))
     return {"ok": True}
 
 
 @app.post("/api/shift")
-async def test_shift():
-    """Move the entity's voice now, on the dashboard with voice enabled (to check the speaker placement)."""
-    if not entity.voice_clients:
-        raise HTTPException(status_code=409, detail="No dashboard with voice enabled is connected")
+async def test_shift(body: dict):
+    """Move the entity's voice now, on the dashboard that asked (to check its speaker placement)."""
+    client_id = _client_id(body)
+    c = entity.clients.get(client_id)
+    if not c or not c.voice:
+        raise HTTPException(status_code=409, detail="Enable voice on this dashboard first")
     s = store.get()
-    bus.command("shift", shift_width=s.shift_width, shift_ms=s.shift_ms)
+    bus.command("shift", client=client_id, shift_width=s.shift_width, shift_ms=s.shift_ms)
     return {"ok": True}
 
 
 @app.get("/api/status")
 async def status():
-    return {"state": entity.state, "agent_id": entity.agent_id, "voice_clients": entity.voice_clients}
+    return {
+        "agent": entity.agent_state, "agent_id": entity.agent_id,
+        "voice_clients": entity.voice_clients, "clients": entity.states(),
+    }
 
 
 @app.get("/api/settings")
@@ -220,7 +238,7 @@ def _ids(body: dict) -> tuple[str, str]:
 
 @app.post("/api/session/claim")
 async def claim_session(body: dict):
-    """Called at ai_start_ms by the dashboard with voice enabled: returns the signed URL and the persona overrides."""
+    """Called by the dashboard when its timeline reaches the AI start: returns the signed URL and the persona overrides."""
     session_id, client_id = _ids(body)
     try:
         return await run_in_threadpool(entity.claim, session_id, client_id)

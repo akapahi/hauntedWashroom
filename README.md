@@ -5,8 +5,10 @@ holds a short, sinister speech-to-speech conversation (ElevenLabs Conversational
 leaving after N visitor turns (default 3), and goes quiet until the next trigger.
 
 The server has no audio of its own, so it can run anywhere, including a free Render web service. All the sound
-(idle music, tape wind-down, approach cue and the entity's voice and mic) comes from the **browser that has the
-dashboard open with 🎙 voice switched on**: a laptop, Pi or old phone in the washroom, plugged into the speakers.
+(idle music, tape wind-down, approach cue and the entity's voice and mic) comes from the browser. **Every browser
+that opens the dashboard with 🎙 voice on gets its own entity and its own ElevenLabs conversation**: one washroom
+machine, or several devices at once, each haunted separately. The sensor wakes all of them; the dashboard's own
+Simulate button wakes only that device.
 
 ```
 ESP32 ──POST /api/trigger──▶  FastAPI server (Render)  ──websocket: logs, status──▶  dashboard(s)
@@ -66,12 +68,12 @@ host on Render.
 
 ## 3. The washroom device
 
-On the machine in the washroom (the one wired to the speakers and a mic):
+On each device that should be haunted (a washroom machine wired to speakers and a mic, or any phone or laptop):
 
 1. Open the dashboard in Chrome. A popup says the experience needs access to your microphone and speakers;
    that one click triggers Chrome's microphone prompt and unlocks sound. The 🎙 button in the header turns
-   green: *voice: this device*. On dashboards that should only watch the logs (your phone, a laptop), click
-   the 🎙 button afterwards to turn voice off there; the choice is remembered per browser.
+   green: *voice: this device*, and this device now has its own entity. On a dashboard that should only watch
+   the logs, click the 🎙 button afterwards to turn voice off there; the choice is remembered per browser.
 2. After a reload the voice device asks Chrome for the microphone by itself and shows a *click anywhere to
    enable sound* popup, because browsers block audio until the page has been clicked once. The server ignores
    triggers while no armed voice device is connected (the dashboard tells you so).
@@ -91,14 +93,15 @@ different spots of the room. **Test shift** plays a hum that travels across them
 POST https://<your-service>.onrender.com/api/trigger?sensor=<optional-name>
 Header (only if TRIGGER_TOKEN is set):  X-Trigger-Token: <token>
 
-200 {"accepted": true,  "reason": "started", "state": "connecting"}
+200 {"accepted": true,  "reason": "started on 2 dashboard(s)", "clients": {"<id>": "started", ...}}
 200 {"accepted": false, "reason": "conversation already in progress" | "cooling down (7s left)" | "agent not ready"
-                                  | "no dashboard with voice enabled is connected", ...}
+                                  | "no dashboard with voice enabled is connected", "clients": {...}}
 401 bad token
 ```
 
-The server ignores triggers while a conversation or cooldown is running, so the ESP32 can fire on every
-detection. The trigger URL is printed in the logs on startup. A ready-made sketch is in
+The sensor starts a conversation on every connected dashboard that has voice enabled, each in its own
+session. A dashboard that is already in a conversation or cooling down ignores it, so the ESP32 can fire on
+every detection. The trigger URL is printed in the logs on startup. A ready-made sketch is in
 [esp32/entity_trigger/entity_trigger.ino](esp32/entity_trigger/entity_trigger.ino): set the URL and token and call
 `triggerEntity()` from your sensor code (it speaks https to Render).
 
@@ -106,9 +109,10 @@ Quick test without hardware: `curl -X POST -H "X-Trigger-Token: <token>" https:/
 
 ## 5. Dashboard
 
-- **Simulate sensor** does the same thing as an ESP32 trigger.
-- **Stop / skip cooldown** ends the current conversation immediately (on whichever device is running it), or skips the cooldown.
-- **🎙 voice** (header): whether *this* browser runs the entity's voice and mic. See section 3.
+- The state pill, the turn bar and the controls are all about *this* device's entity. Each dashboard has its own.
+- **Simulate sensor** starts a conversation on this device only (the real sensor starts one on every voice device).
+- **Stop / skip cooldown** ends this device's conversation immediately, or skips its cooldown.
+- **🎙 voice** (header): whether *this* browser runs an entity, with its mic and speakers. See section 3.
 - **Settings** apply to the next conversation and are saved in `data/settings.json`:
   - *Turns per conversation*: how many times the visitor speaks before the entity leaves.
   - *Reply length*: maximum words per entity reply.
@@ -128,8 +132,8 @@ Quick test without hardware: `curl -X POST -H "X-Trigger-Token: <token>" https:/
       without calling the AI; a playhead shows where you are. Real triggers use the saved values.
       Stop, or anything that ends the conversation, cancels the dashboard side too.
 
-    Every open dashboard plays the idle loop, the tape wind-down and the approach cue for itself (mute the
-    ♪ button on the ones that shouldn't); only the voice device plays the entity.
+    Every dashboard plays its own idle loop, tape wind-down and approach cue when its own entity is
+    triggered (mute the ♪ button on the ones that shouldn't).
   - *Persona*: a specific character, or random each conversation.
   - *Reverb amount / room size*: echo added to the entity's voice on the voice device before it reaches the
     speaker. 0% turns it off.
@@ -146,7 +150,9 @@ Quick test without hardware: `curl -X POST -H "X-Trigger-Token: <token>" https:/
   the entity. These live in the browser's localStorage, not on the server, so each dashboard device
   keeps its own.
 - **Logs** stream live: triggers, what the visitor said (with the turn number), what the entity said,
-  system events and errors, from whichever device is running the voice. They are also written to `logs/entity.log`.
+  system events and errors. By default a dashboard shows its own entity's lines plus server-wide ones; tick
+  **All devices** to see every device's conversation, tagged with the first characters of its id. Everything
+  is also written to `logs/entity.log`.
 
 ## How a conversation ends
 

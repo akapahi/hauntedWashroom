@@ -212,7 +212,7 @@
   <div class="stack">
     <section class="panel">
       <h2>Control</h2>
-      <button class="btn-primary" id="simulateBtn">👻 Simulate sensor</button>
+      <button class="btn-primary" id="simulateBtn" title="Starts a conversation on this device only. The real sensor starts one on every device with voice enabled.">👻 Simulate sensor</button>
       <div class="row" style="margin-top:8px">
         <button id="stopBtn" title="End the conversation now, or skip the cooldown">Stop / skip cooldown</button>
       </div>
@@ -347,6 +347,7 @@
       <button class="filter" data-filter="system">System</button>
       <button class="filter" data-filter="error">Errors</button>
       <span class="spacer"></span>
+      <label title="Also show the other dashboards' conversations"><input type="checkbox" id="allDevices"> All devices</label>
       <label><input type="checkbox" id="autoscroll" checked> Auto-scroll</label>
       <button id="clearBtn" class="filter">Clear view</button>
     </div>
@@ -377,6 +378,9 @@ const FILTERS = {
 };
 let entries = [];
 let filter = "all";
+let showAllDevices = false;
+const mine = (e) => showAllDevices || !e.client || e.client === CLIENT_ID;
+const visible = (e) => FILTERS[filter](e) && mine(e);
 let status = { state: "starting", turn: 0, max_turns: 3 };
 let prevState = null;
 let cooldownTimer = null;
@@ -389,7 +393,9 @@ function entryEl(e) {
   const div = document.createElement("div");
   div.className = `entry k-${e.kind} l-${e.level}`;
   const t = document.createElement("time"); t.textContent = fmtTime(e.ts);
-  const k = document.createElement("span"); k.className = "kind"; k.textContent = e.kind;
+  const k = document.createElement("span"); k.className = "kind";
+  k.textContent = e.client && e.client !== CLIENT_ID ? `${e.kind} ·${e.client.slice(0, 4)}` : e.kind;
+  if (e.client) k.title = e.client === CLIENT_ID ? "this device" : `device ${e.client}`;
   const x = document.createElement("span"); x.className = "text"; x.textContent = e.text;
   div.append(t, k, x);
   return div;
@@ -397,7 +403,7 @@ function entryEl(e) {
 function renderLog() {
   const log = $("log");
   log.replaceChildren();
-  const shown = entries.filter(FILTERS[filter]);
+  const shown = entries.filter(visible);
   if (!shown.length) {
     log.innerHTML = '<div class="empty">Nothing here yet</div>';
     return;
@@ -408,7 +414,7 @@ function renderLog() {
 function addEntry(e) {
   entries.push(e);
   if (entries.length > 1000) entries.shift();
-  if (!FILTERS[filter](e)) return;
+  if (!visible(e)) return;
   const log = $("log");
   log.querySelector(".empty")?.remove();
   log.appendChild(entryEl(e));
@@ -425,6 +431,7 @@ document.querySelectorAll(".filter[data-filter]").forEach((b) =>
   })
 );
 $("clearBtn").addEventListener("click", () => { entries = []; renderLog(); });
+$("allDevices").addEventListener("change", () => { showAllDevices = $("allDevices").checked; renderLog(); });
 
 // ---------- status ----------
 function renderStatus() {
@@ -433,7 +440,7 @@ function renderStatus() {
   $("stateText").textContent = s;
   $("agentMeta").textContent = (status.agent_id ? `agent ${status.agent_id}` : "agent not ready")
     + (status.persona && ["connecting", "active", "ending"].includes(status.state) ? ` · ${status.persona}` : "")
-    + (status.voice_clients === 0 ? " · no voice device!" : status.voice_clients > 1 ? ` · ${status.voice_clients} voice devices` : "");
+    + (status.voice_clients ? ` · ${status.voice_clients} voice device${status.voice_clients > 1 ? "s" : ""}` : " · no voice device");
   const busy = ["connecting", "active", "ending", "cooldown", "starting", "error"].includes(s);
   $("simulateBtn").disabled = busy || !status.agent_id;
 
@@ -460,8 +467,8 @@ function renderStatus() {
     cooldownTimer = setInterval(tick, 500);
   } else if (s === "error") {
     $("controlHint").textContent = "Agent setup failed — check the logs, then Resync agent.";
-  } else if (s === "idle" && status.voice_clients === 0) {
-    $("controlHint").textContent = "No dashboard has voice enabled: triggers will be ignored. Turn on 🎙 voice on the washroom machine.";
+  } else if (s === "idle" && !(voiceOn && voiceArmed)) {
+    $("controlHint").textContent = "Enable 🎙 voice on this device to let the entity speak here.";
   } else if (!["connecting", "active", "ending"].includes(s)) {
     $("controlHint").textContent = "";
   }
@@ -1272,6 +1279,7 @@ function testShift({ shift_width, shift_ms }) {
   osc.onended = () => { try { osc.disconnect(); pan.disconnect(); } catch {} };
 }
 function handleCommand(msg) {
+  if (msg.client && msg.client !== CLIENT_ID) return;
   if (msg.command === "shift" && voiceOn) testShift(msg);
 }
 
@@ -1289,7 +1297,13 @@ function connect() {
     const msg = JSON.parse(ev.data);
     if (msg.type === "history") { entries = msg.entries; renderLog(); }
     else if (msg.type === "log") addEntry(msg);
-    else if (msg.type === "status") { status = { ...status, ...msg }; renderStatus(); }
+    else if (msg.type === "status") {
+      // Global status (agent, settings) has no client; a client status is only ours or someone else's.
+      if (msg.client && msg.client !== CLIENT_ID) return;
+      const { client, ...rest } = msg;
+      status = { ...status, ...rest };
+      renderStatus();
+    }
     else if (msg.type === "command") handleCommand(msg);
   };
 }
@@ -1307,11 +1321,11 @@ async function api(method, path, body) {
 }
 $("simulateBtn").addEventListener("click", async () => {
   try {
-    const r = await api("POST", "/api/simulate");
+    const r = await api("POST", "/api/simulate", { client_id: CLIENT_ID });
     if (!r.accepted) $("controlHint").textContent = `Ignored: ${r.reason}`;
   } catch (e) { $("controlHint").textContent = e.message; }
 });
-$("stopBtn").addEventListener("click", () => api("POST", "/api/stop").catch(() => {}));
+$("stopBtn").addEventListener("click", () => api("POST", "/api/stop", { client_id: CLIENT_ID }).catch(() => {}));
 
 // ---------- settings ----------
 function fillForm(s) {
@@ -1368,7 +1382,7 @@ $("settingsForm").addEventListener("submit", async (ev) => {
 $("testShiftBtn").addEventListener("click", async () => {
   $("testShiftBtn").disabled = true;
   try {
-    await api("POST", "/api/shift");
+    await api("POST", "/api/shift", { client_id: CLIENT_ID });
     $("settingsHint").textContent = "Shifting on the voice device…";
   } catch (e) {
     $("settingsHint").textContent = `Shift: ${e.message}`;

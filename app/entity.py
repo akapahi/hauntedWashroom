@@ -1,14 +1,20 @@
-"""Runs one entity conversation per sensor trigger. The voice itself runs in a browser, not here.
+"""One entity per connected dashboard. The voice itself runs in that dashboard's browser, not here.
 
-Flow: trigger -> state "connecting" (every open dashboard winds the idle music down and plays
-res/<Persona>/approach.wav on its own timeline) -> ai_lead_ms before the cue ends, the dashboard with voice enabled claims the
-session (POST /api/session/claim) and gets a signed ElevenLabs URL plus the persona overrides -> it runs the
-conversation with the ElevenLabs JS SDK on its own mic and speaker, counts turns, tells the agent when the
-next turn is the last, mutes the mic for the farewell, and reports everything here (POST /api/session/report)
+Every dashboard that connects (websocket "hello") gets its own Client: its own state machine (idle ->
+connecting -> active -> ending -> cooldown -> idle), its own session and its own ElevenLabs conversation.
+Dashboards never share a conversation.
+
+Flow for one client: trigger -> state "connecting" (that dashboard winds the idle music down and plays
+res/<Persona>/approach.wav on its own timeline) -> ai_lead_ms before the cue ends, it claims the session
+(POST /api/session/claim) and gets a signed ElevenLabs URL plus the persona overrides -> it runs the
+conversation with the ElevenLabs JS SDK on its own mic and speaker, counts turns, tells the agent when the next
+turn is the last, mutes the mic for the farewell, and reports everything here (POST /api/session/report)
 -> when it says the session has ended (or Stop is pressed, or it disconnects) -> cooldown -> idle.
 
-The server never touches audio, so it can run anywhere (Render, a Pi, a laptop); the machine in the washroom
-only needs a browser with the dashboard open and "voice: this device" switched on.
+The ESP32 trigger starts a conversation on every idle dashboard that has voice enabled; the dashboard's own
+Simulate button starts one on that dashboard only.
+
+The server never touches audio, so it can run anywhere (Render, a Pi, a laptop).
 """
 
 import os
@@ -28,7 +34,7 @@ from .agent_setup import MAX_CONVERSATION_SECONDS, describe_error, signed_url, s
 from .logbus import bus
 from .settings import RES_DIR, Settings, SettingsStore
 
-CLAIM_GRACE_SECONDS = 20        # how long after ai_start_ms we wait for a dashboard to pick the session up
+CLAIM_GRACE_SECONDS = 20        # how long after the AI start we wait for the dashboard to pick the session up
 FAREWELL_IDLE_SECONDS = 1.5     # speaker quiet this long after the farewell => it's finished
 FAREWELL_TIMEOUT_SECONDS = 20   # give up waiting for the farewell after this
 NOTICE_IDLE_SECONDS = 0.3
@@ -39,18 +45,30 @@ CONVERSATION_STATES = ("connecting", "active", "ending")
 @dataclass
 class Session:
     id: str
+    client_id: str
     settings: Settings
     character: persona.Persona
     opening: str
     source: str
     ai_start_ms: int                    # ms after the trigger when the dashboard connects the AI
     started: float = field(default_factory=time.monotonic)
-    claimed_by: str | None = None       # dashboard client id that runs the voice
+    claimed_by: str | None = None       # set once the dashboard has asked for the signed URL
     conversation_id: str | None = None
     user_turns: int = 0
     end_reason: str | None = None
     claimed: threading.Event = field(default_factory=threading.Event)
     ended: threading.Event = field(default_factory=threading.Event)
+
+
+@dataclass
+class Client:
+    """A connected dashboard and the entity that haunts it."""
+    id: str
+    voice: bool = False                 # it has the mic and speakers (armed)
+    state: str = "idle"
+    session: Session | None = None
+    cooldown_until: float = 0.0
+    stop_event: threading.Event = field(default_factory=threading.Event)
 
 
 def approach_cue(character: persona.Persona) -> Path | None:
@@ -98,15 +116,12 @@ class EntityController:
         self.store = store
         self.client = ElevenLabs(api_key=os.environ["ELEVENLABS_API_KEY"])
         self.agent_id: str | None = None
+        self.agent_state = "starting"             # starting | ready | error
         self.persona_voices: dict[str, str] = {}  # persona id -> usable voice id
-        self.state = "starting"
-        self.session: Session | None = None
-        self._clients: dict[str, bool] = {}        # dashboard client id -> has voice enabled
+        self.clients: dict[str, Client] = {}
         self._lock = threading.Lock()
         self._agent_lock = threading.Lock()
-        self._stop_event = threading.Event()
-        self._cooldown_until = 0.0
-        self._publish_status()
+        self._publish_global()
 
     # ---- agent ----------------------------------------------------------------
 
@@ -115,96 +130,130 @@ class EntityController:
         with self._agent_lock:
             try:
                 self.agent_id, self.persona_voices = sync_agent(self.client)
+                self.agent_state = "ready"
                 bus.set_status(personas=list(self.persona_voices))
-                if self.state in ("starting", "error"):
-                    self._set_state("idle")
             except Exception as e:
                 bus.emit("error", f"Agent setup failed: {describe_error(e)}", "error")
-                if self.state == "starting":
-                    self._set_state("error")
+                if self.agent_state == "starting":
+                    self.agent_state = "error"
                 raise
+            finally:
+                self._publish_global()
+                for c in list(self.clients.values()):
+                    self._publish_client(c)
 
     # ---- dashboards -------------------------------------------------------------
 
     @property
     def voice_clients(self) -> int:
-        return sum(1 for v in self._clients.values() if v)
+        return sum(1 for c in self.clients.values() if c.voice)
 
     def client_update(self, client_id: str, voice: bool):
         """A dashboard said hello (or toggled its voice switch)."""
         with self._lock:
-            self._clients[client_id] = voice
-        bus.set_status(voice_clients=self.voice_clients)
+            c = self.clients.get(client_id)
+            if not c:
+                c = self.clients[client_id] = Client(id=client_id)
+            c.voice = voice
+        self._publish_global()
+        self._publish_client(c)
 
     def client_gone(self, client_id: str):
         with self._lock:
-            self._clients.pop(client_id, None)
-            session = self.session
-        bus.set_status(voice_clients=self.voice_clients)
-        if session and session.claimed_by == client_id and not session.ended.is_set():
-            bus.emit("error", "The dashboard running the voice disconnected", "error")
-            self._end_session(session, "dashboard disconnected")
+            c = self.clients.pop(client_id, None)
+        self._publish_global()
+        bus.drop_client_status(client_id)
+        if not c:
+            return
+        c.stop_event.set()   # skips its cooldown too
+        if c.session and not c.session.ended.is_set():
+            bus.emit("error", "The dashboard disconnected during its conversation", "error", client=c.id)
+            self._end_session(c.session, "dashboard disconnected")
+
+    def states(self) -> dict[str, str]:
+        return {c.id: c.state for c in self.clients.values()}
 
     # ---- control ----------------------------------------------------------------
 
-    def trigger(self, source: str) -> tuple[bool, str]:
+    def trigger(self, client_id: str, source: str) -> tuple[bool, str]:
+        """Start a conversation on one dashboard."""
         with self._lock:
+            c = self.clients.get(client_id)
             settings = self.store.get()
             character = persona.pick_persona(settings.persona, list(self.persona_voices))
-            if not self.agent_id:
+            if self.agent_state != "ready":
                 reason = "agent not ready"
-            elif self.state in CONVERSATION_STATES:
+            elif not c:
+                reason = "unknown dashboard (reload the page)"
+            elif not c.voice:
+                reason = "this dashboard hasn't enabled voice"
+            elif c.state in CONVERSATION_STATES:
                 reason = "conversation already in progress"
-            elif self.state == "cooldown":
-                reason = f"cooling down ({max(0.0, self._cooldown_until - time.time()):.0f}s left)"
-            elif not self.voice_clients:
-                reason = "no dashboard with voice enabled is connected"
+            elif c.state == "cooldown":
+                reason = f"cooling down ({max(0.0, c.cooldown_until - time.time()):.0f}s left)"
             elif not character:
                 reason = "no persona has a usable voice"
             else:
                 reason = None
             if reason:
-                bus.emit("trigger", f"Trigger from {source} ignored: {reason}")
+                bus.emit("trigger", f"Trigger from {source} ignored: {reason}", client=client_id)
                 return False, reason
-            self._stop_event.clear()
-            self.session = Session(
+            c.stop_event.clear()
+            c.session = Session(
                 id=secrets.token_hex(8),
+                client_id=c.id,
                 settings=settings,
                 character=character,
                 opening=random.choice(character.opening_lines),
                 source=source,
                 ai_start_ms=ai_start_ms(settings, character),
             )
-            self._set_state("connecting")
-            threading.Thread(target=self._run, args=(self.session,), daemon=True, name="entity-session").start()
+            self._set_state(c, "connecting")
+            threading.Thread(target=self._run, args=(c, c.session), daemon=True, name=f"entity-{c.id[:8]}").start()
         return True, "started"
 
-    def stop(self):
-        """Ends the current conversation immediately (or skips the cooldown)."""
-        self._stop_event.set()
+    def trigger_all(self, source: str) -> dict[str, tuple[bool, str]]:
+        """The sensor fired: start a conversation on every dashboard that has voice enabled."""
+        with self._lock:
+            ids = [c.id for c in self.clients.values() if c.voice]
+        if not ids:
+            bus.emit("trigger", f"Trigger from {source} ignored: no dashboard with voice enabled is connected")
+        return {cid: self.trigger(cid, source) for cid in ids}
 
-    # ---- the voice dashboard talks to us ----------------------------------------------
+    def stop(self, client_id: str | None = None):
+        """Ends that dashboard's conversation immediately (or skips its cooldown); all of them if no id."""
+        with self._lock:
+            targets = [self.clients[client_id]] if client_id in self.clients else [] if client_id else list(self.clients.values())
+        for c in targets:
+            c.stop_event.set()
+
+    # ---- the dashboard talks to us about its session ----------------------------------
+
+    def _client_session(self, session_id: str, client_id: str) -> tuple[Client, Session] | None:
+        c = self.clients.get(client_id)
+        s = c.session if c else None
+        return (c, s) if s and s.id == session_id else None
 
     def claim(self, session_id: str, client_id: str) -> dict:
-        """The dashboard that will run the conversation asks for the signed URL and the persona overrides."""
+        """The dashboard asks for the signed URL and the persona overrides for its own session."""
         with self._lock:
-            session = self.session
-            if not session or session.id != session_id or self.state != "connecting":
-                raise LookupError("no conversation is waiting to be picked up")
+            found = self._client_session(session_id, client_id)
+            if not found or found[0].state != "connecting":
+                raise LookupError("no conversation is waiting to be picked up on this dashboard")
+            c, session = found
             if session.claimed_by:
-                raise PermissionError("another dashboard is already running this conversation"
-                                      if session.claimed_by != client_id else "this conversation was already picked up")
-            if not self._clients.get(client_id):
+                raise PermissionError("this conversation was already picked up")
+            if not c.voice:
                 raise PermissionError("this dashboard hasn't enabled voice")
             session.claimed_by = client_id
         try:
             url = signed_url(self.client, self.agent_id)
         except Exception as e:
-            bus.emit("error", f"Couldn't get a signed URL from ElevenLabs: {describe_error(e)}", "error")
+            bus.emit("error", f"Couldn't get a signed URL from ElevenLabs: {describe_error(e)}", "error", client=c.id)
             self._end_session(session, "no signed url")
             raise
         session.claimed.set()
-        bus.emit("system", "The dashboard picked up the conversation, connecting to ElevenLabs...")
+        bus.emit("system", "The dashboard picked up the conversation, connecting to ElevenLabs...", client=c.id)
         s = session.settings
         return {
             "session_id": session.id,
@@ -248,34 +297,35 @@ class EntityController:
 
     def report(self, session_id: str, client_id: str, event: dict) -> bool:
         """Something happened in the browser's conversation. Returns False if it's about a session that's over."""
-        session = self.session
-        if not session or session.id != session_id or session.claimed_by != client_id or session.ended.is_set():
+        found = self._client_session(session_id, client_id)
+        if not found or not found[1].claimed_by or found[1].ended.is_set():
             return False
+        c, session = found
         kind = event.get("event")
         text = _text(event.get("text"))
         s = session.settings
         if kind == "connected":
             session.conversation_id = _text(event.get("conversation_id"), 100) or None
-            if self.state == "connecting":
-                self._set_state("active")
-            bus.emit("system", f"Connected, the entity speaks first (max {s.max_turns} turns, ≤{s.max_words} words/reply)")
+            if c.state == "connecting":
+                self._set_state(c, "active")
+            bus.emit("system", f"Connected, the entity speaks first (max {s.max_turns} turns, ≤{s.max_words} words/reply)", client=c.id)
         elif kind == "entity":
-            bus.emit("entity", text)
+            bus.emit("entity", text, client=c.id)
         elif kind == "visitor":
             turn = event.get("turn")
             if isinstance(turn, int) and turn > 0:
                 session.user_turns = turn
-                bus.emit("visitor", f"[turn {turn}/{s.max_turns}] {text}")
-                bus.set_status(turn=turn)
+                bus.emit("visitor", f"[turn {turn}/{s.max_turns}] {text}", client=c.id)
+                bus.set_client_status(c.id, turn=turn)
             else:
-                bus.emit("visitor", text)
+                bus.emit("visitor", text, client=c.id)
         elif kind == "system":
-            bus.emit("system", text, "warn" if event.get("level") == "warn" else "info")
+            bus.emit("system", text, "warn" if event.get("level") == "warn" else "info", client=c.id)
         elif kind == "error":
-            bus.emit("error", text, "error")
+            bus.emit("error", text, "error", client=c.id)
         elif kind == "ending":
-            if self.state in ("connecting", "active"):
-                self._set_state("ending")
+            if c.state in ("connecting", "active"):
+                self._set_state(c, "ending")
         elif kind == "ended":
             self._end_session(session, _text(event.get("reason"), 200) or "ended")
         else:
@@ -288,79 +338,91 @@ class EntityController:
 
     # ---- session ----------------------------------------------------------------
 
-    def _run(self, session: Session):
+    def _run(self, c: Client, session: Session):
         s = session.settings
-        bus.emit("trigger", f"Triggered by {session.source}. Summoning the entity...")
+        bus.emit("trigger", f"Triggered by {session.source}. Summoning the entity...", client=c.id)
         try:
             if s.persona not in (persona.RANDOM, session.character.id):
-                bus.emit("system", f"Persona '{s.persona}' is unavailable, using {session.character.name}", "warn")
-            bus.emit("system", f"Persona: {session.character.name}")
+                bus.emit("system", f"Persona '{s.persona}' is unavailable, using {session.character.name}", "warn", client=c.id)
+            bus.emit("system", f"Persona: {session.character.name}", client=c.id)
             cue_url = approach_cue_url(session.character)
-            bus.set_status(persona=session.character.name, approach_cue=cue_url)
+            bus.set_client_status(c.id, persona=session.character.name, approach_cue=cue_url)
             if not cue_url:
-                bus.emit("system", f"No approach cue for {session.character.name} (res/{session.character.name}/approach.wav)", "warn")
+                bus.emit("system", f"No approach cue for {session.character.name} (res/{session.character.name}/approach.wav)", "warn", client=c.id)
 
-            # Timeline. The dashboards saw the state turn "connecting" and run the tape wind-down and the
-            # approach cue; the one with voice enabled brings the AI in at session.ai_start_ms (sent in the status).
+            # Timeline. The dashboard saw its state turn "connecting" and runs the tape wind-down and the
+            # approach cue; it brings the AI in at session.ai_start_ms (sent in its status).
             hold = session.ai_start_ms / 1000
             bus.emit("system", f"Timeline: the dashboard connects the AI at {hold:.1f}s, "
-                     f"{s.ai_lead_ms / 1000:.1f}s before the approach cue ends (tape, cue and voice all play there)")
+                     f"{s.ai_lead_ms / 1000:.1f}s before the approach cue ends", client=c.id)
             deadline = time.monotonic() + hold + CLAIM_GRACE_SECONDS
             while not session.claimed.is_set():
-                if self._stop_event.is_set():
-                    bus.emit("system", "Stopped before the entity arrived")
+                if c.stop_event.is_set():
+                    bus.emit("system", "Stopped before the entity arrived", client=c.id)
                     return
                 if session.ended.is_set():
                     return
                 if time.monotonic() > deadline:
                     bus.emit(
                         "error",
-                        f"No dashboard picked up the conversation within {CLAIM_GRACE_SECONDS}s of the AI start. "
-                        "Is the dashboard in the washroom open, with voice enabled and armed?",
-                        "error",
+                        f"The dashboard didn't pick up the conversation within {CLAIM_GRACE_SECONDS}s of the AI start. "
+                        "Is it still open, with voice enabled and armed?",
+                        "error", client=c.id,
                     )
                     return
-                self._stop_event.wait(0.2)
+                c.stop_event.wait(0.2)
 
             hard_stop = time.monotonic() + MAX_CONVERSATION_SECONDS + 30
             while not session.ended.is_set():
-                if self._stop_event.is_set():
-                    bus.emit("system", "Stopped from dashboard")
+                if c.stop_event.is_set():
+                    bus.emit("system", "Stopped from dashboard", client=c.id)
                     return
                 if time.monotonic() > hard_stop:
-                    bus.emit("system", "Max conversation duration reached", "warn")
+                    bus.emit("system", "Max conversation duration reached", "warn", client=c.id)
                     return
-                self._stop_event.wait(0.2)
+                c.stop_event.wait(0.2)
             conv = f", id {session.conversation_id}" if session.conversation_id else ""
-            bus.emit("system", f"Conversation ended ({session.end_reason}{conv}, {session.user_turns} visitor turns)")
+            bus.emit("system", f"Conversation ended ({session.end_reason}{conv}, {session.user_turns} visitor turns)", client=c.id)
         finally:
             with self._lock:
-                self.session = None
-            self._cool_down(s.cooldown)
+                if c.session is session:
+                    c.session = None
+            self._cool_down(c, s.cooldown)
 
-    def _cool_down(self, seconds: int):
-        if seconds > 0 and not self._stop_event.is_set():
-            self._cooldown_until = time.time() + seconds
-            self._set_state("cooldown")
-            self._stop_event.wait(seconds)
+    def _cool_down(self, c: Client, seconds: int):
+        if seconds > 0 and not c.stop_event.is_set():
+            c.cooldown_until = time.time() + seconds
+            self._set_state(c, "cooldown")
+            c.stop_event.wait(seconds)
         with self._lock:
-            self._cooldown_until = 0.0
-            self._set_state("idle")
+            c.cooldown_until = 0.0
+            self._set_state(c, "idle")
 
     # ---- status -----------------------------------------------------------------
 
-    def _set_state(self, state: str):
-        self.state = state
-        self._publish_status()
+    def _set_state(self, c: Client, state: str):
+        c.state = state
+        self._publish_client(c)
 
-    def _publish_status(self):
-        extra = {"turn": 0, "ai_start_ms": self.session.ai_start_ms} if self.state == "connecting" and self.session else {}
+    def _publish_global(self):
         bus.set_status(
-            state=self.state,
-            max_turns=self.store.get().max_turns,
-            cooldown_until=self._cooldown_until or None,
+            agent_state=self.agent_state,
             agent_id=self.agent_id,
-            session_id=self.session.id if self.session else None,
+            max_turns=self.store.get().max_turns,
             voice_clients=self.voice_clients,
+        )
+
+    def _publish_client(self, c: Client):
+        if c.id not in self.clients:
+            return   # it left; don't resurrect its status
+        extra = {}
+        if c.state == "connecting" and c.session:
+            extra = {"turn": 0, "ai_start_ms": c.session.ai_start_ms}
+        bus.set_client_status(
+            c.id,
+            state=c.state if self.agent_state == "ready" else self.agent_state,
+            cooldown_until=c.cooldown_until or None,
+            session_id=c.session.id if c.session else None,
+            voice=c.voice,
             **extra,
         )

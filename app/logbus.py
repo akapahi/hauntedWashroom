@@ -20,29 +20,43 @@ class LogBus:
         self._subscribers: set[asyncio.Queue] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._status: dict = {}
+        self._client_status: dict[str, dict] = {}
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop):
         self._loop = loop
 
-    def emit(self, kind: str, text: str, level: str = "info"):
-        """kind: system | trigger | entity | visitor | error"""
-        entry = {"type": "log", "ts": time.time(), "kind": kind, "level": level, "text": text}
+    def emit(self, kind: str, text: str, level: str = "info", client: str | None = None):
+        """kind: system | trigger | entity | visitor | error. client: the dashboard it concerns (None = everyone)."""
+        entry = {"type": "log", "ts": time.time(), "kind": kind, "level": level, "text": text, "client": client}
         with self._lock:
             self._history.append(entry)
         getattr(log, "error" if level == "error" else "warning" if level == "warn" else "info")(
-            "[%s] %s", kind, text
+            "[%s]%s %s", kind, f"[{client[:8]}]" if client else "", text
         )
         self._broadcast(entry)
 
     def set_status(self, **status):
+        """Status shared by every dashboard (agent, settings, how many have voice)."""
         with self._lock:
             self._status.update(status)
             snapshot = {"type": "status", **self._status}
         self._broadcast(snapshot)
 
-    def command(self, name: str, **data):
-        """A one-off instruction for the connected dashboards (e.g. a test shift). Not kept in the history."""
-        self._broadcast({"type": "command", "command": name, **data})
+    def set_client_status(self, client_id: str, **status):
+        """One dashboard's own status (its state, turn, session). Other dashboards ignore it."""
+        with self._lock:
+            current = self._client_status.setdefault(client_id, {})
+            current.update(status)
+            snapshot = {"type": "status", "client": client_id, **current}
+        self._broadcast(snapshot)
+
+    def drop_client_status(self, client_id: str):
+        with self._lock:
+            self._client_status.pop(client_id, None)
+
+    def command(self, name: str, client: str | None = None, **data):
+        """A one-off instruction for a dashboard (e.g. a test shift), or all of them. Not kept in the history."""
+        self._broadcast({"type": "command", "command": name, "client": client, **data})
 
     def snapshot(self) -> tuple[list[dict], dict]:
         with self._lock:
