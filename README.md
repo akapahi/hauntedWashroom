@@ -126,8 +126,10 @@ Quick test without hardware: `curl -X POST -H "X-Trigger-Token: <token>" https:/
       persona id works too) starts playing. Overlapping the tape's tail is the default.
     - *AI connects before approach ends*: the voice device asks the server for a signed URL and opens the
       ElevenLabs conversation this long before the approach cue finishes (default 1 s), so the moment follows
-      the cue's length; the entity speaks a second or two later. If no voice device picks it up within 20 s,
-      the trigger is written off and the entity cools down.
+      the cue's length; the entity speaks a second or two later. The server requests the signed URL from
+      ElevenLabs the moment the trigger comes in (8 s timeout, one retry), so an ElevenLabs outage is reported
+      while the cue is still playing instead of as a hung dashboard. If no voice device picks it up within
+      20 s, the trigger is written off and the entity cools down.
     - **Preview timeline** runs the tape and approach cue with the values in the form (unsaved too)
       without calling the AI; a playhead shows where you are. Real triggers use the saved values.
       Stop, or anything that ends the conversation, cancels the dashboard side too.

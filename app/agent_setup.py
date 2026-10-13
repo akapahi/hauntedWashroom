@@ -42,9 +42,25 @@ def ensure_voice(client: ElevenLabs, voice_id: str) -> str:
     return added.voice_id or voice_id
 
 
+SIGNED_URL_TIMEOUT = 8      # seconds per attempt; ElevenLabs normally answers in well under one
+SIGNED_URL_ATTEMPTS = 2
+
+
 def signed_url(client: ElevenLabs, agent_id: str) -> str:
-    """A short-lived URL the browser uses to open the conversation websocket without seeing the API key."""
-    return client.conversational_ai.conversations.get_signed_url(agent_id=agent_id).signed_url
+    """A short-lived URL the browser uses to open the conversation websocket without seeing the API key.
+
+    Short timeout and one retry: when ElevenLabs is degraded this call has been seen to hang for minutes
+    before failing, and the approach cue is only a few seconds long.
+    """
+    last: Exception | None = None
+    for _ in range(SIGNED_URL_ATTEMPTS):
+        try:
+            return client.conversational_ai.conversations.get_signed_url(
+                agent_id=agent_id, request_options={"timeout_in_seconds": SIGNED_URL_TIMEOUT}
+            ).signed_url
+        except Exception as e:  # ApiError, httpx timeouts, connection errors
+            last = e
+    raise last
 
 
 def find_agent(client: ElevenLabs) -> str | None:

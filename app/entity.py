@@ -5,8 +5,9 @@ connecting -> active -> ending -> cooldown -> idle), its own session and its own
 Dashboards never share a conversation.
 
 Flow for one client: trigger -> state "connecting" (that dashboard winds the idle music down and plays
-res/<Persona>/approach.wav on its own timeline) -> ai_lead_ms before the cue ends, it claims the session
-(POST /api/session/claim) and gets a signed ElevenLabs URL plus the persona overrides -> it runs the
+res/<Persona>/approach.wav on its own timeline; meanwhile the server already fetches the signed ElevenLabs
+URL, so an ElevenLabs problem shows up while the cue is still playing) -> ai_lead_ms before the cue ends, it
+claims the session (POST /api/session/claim) and gets that signed URL plus the persona overrides -> it runs the
 conversation with the ElevenLabs JS SDK on its own mic and speaker, counts turns, tells the agent when the next
 turn is the last, mutes the mic for the farewell, and reports everything here (POST /api/session/report)
 -> when it says the session has ended (or Stop is pressed, or it disconnects) -> cooldown -> idle.
@@ -53,10 +54,13 @@ class Session:
     ai_start_ms: int                    # ms after the trigger when the dashboard connects the AI
     started: float = field(default_factory=time.monotonic)
     claimed_by: str | None = None       # set once the dashboard has asked for the signed URL
+    signed_url: str | None = None       # fetched right after the trigger, handed over on claim
+    url_error: str | None = None        # why the fetch failed, if it did
+    url_ready: threading.Event = field(default_factory=threading.Event)   # signed_url or url_error is set
     conversation_id: str | None = None
     user_turns: int = 0
     end_reason: str | None = None
-    claimed: threading.Event = field(default_factory=threading.Event)
+    claimed: threading.Event = field(default_factory=threading.Event)     # the dashboard has the URL
     ended: threading.Event = field(default_factory=threading.Event)
 
 
@@ -246,18 +250,17 @@ class EntityController:
             if not c.voice:
                 raise PermissionError("this dashboard hasn't enabled voice")
             session.claimed_by = client_id
-        try:
-            url = signed_url(self.client, self.agent_id)
-        except Exception as e:
-            bus.emit("error", f"Couldn't get a signed URL from ElevenLabs: {describe_error(e)}", "error", client=c.id)
-            self._end_session(session, "no signed url")
-            raise
+        # The URL was requested when the trigger came in; normally it's long here. If ElevenLabs is slow,
+        # wait for it (the run thread gives up, with a clear message, at the same deadline).
+        session.url_ready.wait(CLAIM_GRACE_SECONDS)
+        if not session.signed_url:
+            raise RuntimeError(session.url_error or f"ElevenLabs didn't return a signed URL within {CLAIM_GRACE_SECONDS}s")
         session.claimed.set()
         bus.emit("system", "The dashboard picked up the conversation, connecting to ElevenLabs...", client=c.id)
         s = session.settings
         return {
             "session_id": session.id,
-            "signed_url": url,
+            "signed_url": session.signed_url,
             "persona": session.character.name,
             "overrides": {
                 "agent": {
@@ -355,6 +358,8 @@ class EntityController:
             hold = session.ai_start_ms / 1000
             bus.emit("system", f"Timeline: the dashboard connects the AI at {hold:.1f}s, "
                      f"{s.ai_lead_ms / 1000:.1f}s before the approach cue ends", client=c.id)
+            threading.Thread(target=self._fetch_signed_url, args=(c, session), daemon=True,
+                             name=f"signed-url-{c.id[:8]}").start()
             deadline = time.monotonic() + hold + CLAIM_GRACE_SECONDS
             while not session.claimed.is_set():
                 if c.stop_event.is_set():
@@ -363,12 +368,15 @@ class EntityController:
                 if session.ended.is_set():
                     return
                 if time.monotonic() > deadline:
-                    bus.emit(
-                        "error",
-                        f"The dashboard didn't pick up the conversation within {CLAIM_GRACE_SECONDS}s of the AI start. "
-                        "Is it still open, with voice enabled and armed?",
-                        "error", client=c.id,
-                    )
+                    if not session.url_ready.is_set():
+                        why = (f"ElevenLabs didn't return a signed URL within {CLAIM_GRACE_SECONDS}s of the AI start "
+                               "(check status.elevenlabs.io)")
+                    elif session.claimed_by:
+                        why = "The dashboard asked for the conversation but never received it"
+                    else:
+                        why = (f"The dashboard didn't pick up the conversation within {CLAIM_GRACE_SECONDS}s of the AI start. "
+                               "Is it still open, with voice enabled and armed?")
+                    bus.emit("error", why, "error", client=c.id)
                     return
                 c.stop_event.wait(0.2)
 
@@ -388,6 +396,18 @@ class EntityController:
                 if c.session is session:
                     c.session = None
             self._cool_down(c, s.cooldown)
+
+    def _fetch_signed_url(self, c: Client, session: Session):
+        """Gets the conversation URL from ElevenLabs while the approach cue plays, so the claim is instant."""
+        try:
+            session.signed_url = signed_url(self.client, self.agent_id)
+        except Exception as e:
+            session.url_error = f"Couldn't get a signed URL from ElevenLabs: {describe_error(e)}"
+            if not session.ended.is_set() and not c.stop_event.is_set():
+                bus.emit("error", session.url_error, "error", client=c.id)
+            self._end_session(session, "no signed url")
+        finally:
+            session.url_ready.set()
 
     def _cool_down(self, c: Client, seconds: int):
         if seconds > 0 and not c.stop_event.is_set():
