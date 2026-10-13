@@ -8,30 +8,47 @@ from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT_DIR / "data"
-RES_DIR = ROOT_DIR / "res"  # media: the dashboard's idle loop, and res/<Persona>/approach.wav per character
+RES_DIR = ROOT_DIR / "res"  # media: the idle loop, and res/<Persona>/approach.wav per character
 SETTINGS_FILE = DATA_DIR / "settings.json"
 AGENT_FILE = DATA_DIR / "agent.json"
+
 
 @dataclass
 class Settings:
     max_turns: int = 3          # visitor replies before the entity leaves
     max_words: int = 25         # upper bound on words per entity reply
-    silence_timeout: int = 15   # seconds of visitor silence before the entity provokes them (uses up a turn)
+    silence_timeout: int = 10   # seconds of visitor silence before the entity provokes them (uses up a turn)
     cooldown: int = 10          # seconds after a conversation during which triggers are ignored
-    # Timeline, in ms after the trigger. The dashboards play the idle loop, the tape wind-down and the
-    # approach cue; the one with voice enabled connects the AI ai_lead_ms before the cue ends.
+    # Timeline, in ms after the trigger. All of it plays on this machine's speakers.
     detune_start_ms: int = 0        # idle music starts winding down like a tape
     detune_len_ms: int = 3000       # how long the wind-down takes
     approach_start_ms: int = 2000   # res/<Persona>/approach.wav starts (overlapping the tape's tail by default)
-    ai_lead_ms: int = 1000          # the voice dashboard connects to ElevenLabs this long before the approach cue ends
+    ai_lead_ms: int = 1000          # the entity connects to ElevenLabs this long before the approach cue ends
     persona: str = "random"     # persona id from persona.py, or "random" (voices live in persona.py)
-    # The entity's voice plays in the browser that has voice enabled; these shape it there.
+    # Idle music: res/Infinite_Dancefloor.mp3 (or .wav) loops whenever the entity is idle.
+    idle_music: bool = True
+    music_volume: int = 50      # %
+    # The entity's voice.
     half_duplex: bool = True    # mute the mic while the entity speaks (prevents speaker echo)
     reverb_mix: int = 25        # reverb wet level, % (0 = off)
     reverb_decay_ms: int = 1500 # reverb decay time (room size)
-    shift_enabled: bool = True  # let the entity move its voice between the left and right speaker with [shift]
-    shift_width: int = 100      # how far to the sides it goes, % (100 = hard left / hard right)
+    # Voice shifting: the entity's voice moves between PulseAudio sinks (speakers in different spots).
+    shift_enabled: bool = True
+    shift_outputs: str = ""     # PulseAudio sink names, comma-separated (pactl list short sinks); blank = off
+    shift_level: int = 100      # volume % of the sink the entity is at (the others sit at 0)
     shift_ms: int = 2500        # how long the voice takes to travel
+    # Tape wind-down: how the idle music dies when the entity is triggered (see music.py).
+    tape_die_at: int = 72           # % of the way through, the point where it starts giving up
+    tape_floor_speed: int = 55      # % speed it sags down to before the final plunge
+    tape_wow_hz: float = 0.4        # slow pitch wobble, Hz
+    tape_wow_depth: int = 7         # ±%
+    tape_flutter_hz: float = 6.0    # fast pitch wobble, Hz
+    tape_flutter_depth: float = 1.2 # ±%
+    tape_filter_hz: int = 220       # the lowpass closes down to this
+    tape_q_max: float = 10.0        # resonance at the end
+    tape_drive_max: float = 14.0    # distortion drive at the end
+    tape_dropout: int = 25          # % chance per block of a dropout while dying
+    tape_stutter: int = 12          # % chance per block of a stutter while dying
 
 
 # (min, max) for numeric settings
@@ -44,10 +61,22 @@ LIMITS = {
     "detune_len_ms": (500, 30000),
     "approach_start_ms": (0, 60000),
     "ai_lead_ms": (0, 30000),
+    "music_volume": (0, 100),
     "reverb_mix": (0, 100),
     "reverb_decay_ms": (300, 4000),
-    "shift_width": (10, 100),
+    "shift_level": (0, 100),
     "shift_ms": (300, 10000),
+    "tape_die_at": (30, 95),
+    "tape_floor_speed": (10, 100),
+    "tape_wow_hz": (0.1, 3),
+    "tape_wow_depth": (0, 30),
+    "tape_flutter_hz": (1, 15),
+    "tape_flutter_depth": (0, 10),
+    "tape_filter_hz": (50, 5000),
+    "tape_q_max": (0.7, 25),
+    "tape_drive_max": (1, 40),
+    "tape_dropout": (0, 100),
+    "tape_stutter": (0, 100),
 }
 
 
@@ -89,11 +118,15 @@ class SettingsStore:
                 continue
             if key in LIMITS:
                 lo, hi = LIMITS[key]
-                value = int(value)
+                value = float(value) if types[key] in (float, "float") else int(value)
                 if not lo <= value <= hi:
                     raise ValueError(f"{key} must be between {lo} and {hi}")
-            elif types[key] is bool or types[key] == "bool":
+            elif types[key] in (bool, "bool"):
                 value = bool(value)
+            elif key == "shift_outputs":
+                from .shifter import parse_outputs  # local import: shifter -> logbus -> settings
+
+                value = ",".join(parse_outputs(str(value)))
             elif key == "persona":
                 from .persona import PERSONA_BY_ID, RANDOM
 

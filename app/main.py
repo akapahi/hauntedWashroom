@@ -1,14 +1,14 @@
 """HTTP API + dashboard.
 
 ESP32:      POST /api/trigger            (header X-Trigger-Token if TRIGGER_TOKEN is set)
-Dashboard:  GET  /                       POST /api/simulate   POST /api/stop   POST /api/shift
-            GET/PUT /api/settings        POST /api/agent/sync WS /ws (live logs + status)
-            POST /api/session/claim      POST /api/session/report   (the dashboard that runs the voice)
-            GET  /res/<file>             (media the dashboard plays, e.g. the idle loop)
-Anyone:     GET  /api/health             (Render's health check)
+Dashboard:  GET  /                       POST /api/simulate   POST /api/stop     POST /api/preview
+            POST /api/tape/test          POST /api/shift      GET/PUT /api/settings
+            POST /api/agent/sync         WS /ws (live logs + status)
+            GET  /res/<file>             (so the dashboard can read the approach cue's length for the timeline)
+Anyone:     GET  /api/health
 
 If DASHBOARD_PASSWORD is set, everything but /api/trigger and /api/health asks for it (HTTP Basic; the
-browser remembers it, and a cookie covers the websocket and media requests).
+browser remembers it, and a cookie covers the websocket).
 """
 
 import asyncio
@@ -33,13 +33,12 @@ from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 from . import persona  # noqa: E402
 from .agent_setup import describe_error  # noqa: E402
-from .entity import EntityController, approach_cue_url  # noqa: E402
+from .entity import EntityController, approach_cue_seconds, approach_cue_url  # noqa: E402
 from .logbus import bus, setup_logging  # noqa: E402
 from .settings import LIMITS, RES_DIR, ROOT_DIR, SettingsStore  # noqa: E402
 
 TRIGGER_TOKEN = os.getenv("TRIGGER_TOKEN", "").strip()
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "").strip()
-PUBLIC_URL = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")   # Render sets this; blank elsewhere
 AUTH_COOKIE = "washroom_dash"
 PUBLIC_PATHS = {"/api/trigger", "/api/health"}
 STATIC_DIR = ROOT_DIR / "static"
@@ -62,23 +61,23 @@ async def lifespan(app: FastAPI):
     global entity
     bus.bind_loop(asyncio.get_running_loop())
     setup_logging(bus)
-    base = PUBLIC_URL or f"http://{_lan_ip()}:{os.getenv('PORT', '8000')}"
-    bus.emit("system", f"Server up. ESP32 trigger URL: {base}/api/trigger"
+    port = os.getenv("PORT", "8000")
+    bus.emit("system", f"Server up. ESP32 trigger URL: http://{_lan_ip()}:{port}/api/trigger"
              + (" (token required)" if TRIGGER_TOKEN else " (no token set)"))
-    if PUBLIC_URL:
-        if not DASHBOARD_PASSWORD:
-            bus.emit("system", "DASHBOARD_PASSWORD is not set: anyone with the URL can control the entity", "warn")
-        if not TRIGGER_TOKEN:
-            bus.emit("system", "TRIGGER_TOKEN is not set: anyone with the URL can trigger the entity", "warn")
-    bus.emit("system", "Every dashboard with voice enabled gets its own entity; the sensor wakes all of them at once")
     entity = EntityController(store)
-    # Sync the agent in the background so the dashboard is reachable even if ElevenLabs is slow/unreachable.
-    threading.Thread(target=_safe_sync, daemon=True).start()
+    # Audio setup and the agent sync run in the background so the dashboard is reachable even if
+    # ElevenLabs is slow/unreachable.
+    threading.Thread(target=_safe_setup, daemon=True).start()
     yield
     entity.stop()
+    entity.music.stop()
 
 
-def _safe_sync():
+def _safe_setup():
+    try:
+        entity.setup_audio()
+    except Exception as e:
+        bus.emit("error", f"Audio setup failed: {e}", "error")
     try:
         entity.sync_agent()
     except Exception:
@@ -88,7 +87,6 @@ def _safe_sync():
 app = FastAPI(title="Washroom Bhoot", lifespan=lifespan)
 
 if RES_DIR.is_dir():
-    # StaticFiles (not FileResponse) so the browser gets range requests and can loop the track smoothly.
     app.mount("/res", StaticFiles(directory=RES_DIR), name="res")
 
 
@@ -139,7 +137,7 @@ async def index():
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "agent": entity.agent_state if entity else "starting"}
+    return {"ok": True, "state": entity.state if entity else "starting"}
 
 
 @app.post("/api/trigger")
@@ -148,62 +146,61 @@ async def trigger(request: Request, sensor: str = "esp32", token: str = ""):
         supplied = request.headers.get("X-Trigger-Token", token)
         if not secrets.compare_digest(supplied, TRIGGER_TOKEN):
             raise HTTPException(status_code=401, detail="bad trigger token")
-    # The sensor wakes the entity on every dashboard that has voice enabled, each in its own conversation.
-    results = entity.trigger_all(f"sensor '{sensor}'")
-    started = [cid for cid, (ok, _) in results.items() if ok]
-    reason = (f"started on {len(started)} dashboard(s)" if started
-              else next((r for _, r in results.values()), "no dashboard with voice enabled is connected"))
-    return {"accepted": bool(started), "reason": reason, "clients": {cid: r for cid, (_, r) in results.items()}}
-
-
-def _client_id(body: dict) -> str:
-    client_id = body.get("client_id")
-    if not isinstance(client_id, str):
-        raise HTTPException(status_code=400, detail="client_id is required")
-    return client_id
+    accepted, reason = entity.trigger(f"sensor '{sensor}'")
+    return {"accepted": accepted, "reason": reason, "state": entity.state}
 
 
 @app.post("/api/simulate")
-async def simulate(body: dict):
-    """The dashboard's own button: starts a conversation on that dashboard only."""
-    client_id = _client_id(body)
-    accepted, reason = entity.trigger(client_id, "dashboard (simulated sensor)")
-    return {"accepted": accepted, "reason": reason, "state": entity.states().get(client_id)}
+async def simulate():
+    accepted, reason = entity.trigger("dashboard (simulated sensor)")
+    return {"accepted": accepted, "reason": reason, "state": entity.state}
+
+
+@app.post("/api/preview")
+async def preview():
+    """The tape wind-down and the approach cue, on the speakers, without the AI."""
+    accepted, reason = entity.preview()
+    return {"accepted": accepted, "reason": reason, "state": entity.state}
 
 
 @app.post("/api/stop")
-async def stop(body: dict):
-    entity.stop(_client_id(body))
+async def stop():
+    entity.stop()
+    return {"ok": True}
+
+
+@app.post("/api/tape/test")
+async def test_tape():
+    accepted, reason = entity.test_tape()
+    if not accepted:
+        raise HTTPException(status_code=409, detail=reason)
     return {"ok": True}
 
 
 @app.post("/api/shift")
-async def test_shift(body: dict):
-    """Move the entity's voice now, on the dashboard that asked (to check its speaker placement)."""
-    client_id = _client_id(body)
-    c = entity.clients.get(client_id)
-    if not c or not c.voice:
-        raise HTTPException(status_code=409, detail="Enable voice on this dashboard first")
-    s = store.get()
-    bus.command("shift", client=client_id, shift_width=s.shift_width, shift_ms=s.shift_ms)
-    return {"ok": True}
+async def test_shift():
+    """Move the entity's voice now, without a conversation (for checking the speaker setup)."""
+    target = await run_in_threadpool(entity.test_shift)
+    if not target:
+        raise HTTPException(status_code=409, detail="Shift not possible right now, see the logs")
+    return {"to": target}
 
 
 @app.get("/api/status")
 async def status():
-    return {
-        "agent": entity.agent_state, "agent_id": entity.agent_id,
-        "voice_clients": entity.voice_clients, "clients": entity.states(),
-    }
+    return {"state": entity.state, "agent_id": entity.agent_id, "music": entity.music.playing}
 
 
 @app.get("/api/settings")
 async def get_settings():
     personas = [
-        {"id": p.id, "name": p.name, "available": p.id in entity.persona_voices, "approach_cue": approach_cue_url(p)}
+        {
+            "id": p.id, "name": p.name, "available": p.id in entity.persona_voices,
+            "approach_cue": approach_cue_url(p), "approach_seconds": approach_cue_seconds(p),
+        }
         for p in persona.PERSONAS
     ]
-    return {"settings": asdict(store.get()), "limits": LIMITS, "personas": personas}
+    return {"settings": asdict(store.get()), "limits": LIMITS, "personas": personas, "sinks": entity.shifter.sinks()}
 
 
 @app.put("/api/settings")
@@ -215,6 +212,10 @@ async def put_settings(changes: dict):
     if changed:
         bus.emit("system", "Settings updated: " + ", ".join(f"{k}={getattr(new, k)}" for k in sorted(changed)))
         bus.set_status(max_turns=new.max_turns)
+    if any(k.startswith("shift_") for k in changed):
+        await run_in_threadpool(entity.apply_shift_settings)
+    if changed & {"idle_music", "music_volume"}:
+        await run_in_threadpool(entity.apply_music_settings)
     return {"settings": asdict(new)}
 
 
@@ -227,42 +228,6 @@ async def resync_agent():
     return {"agent_id": entity.agent_id}
 
 
-# ---- the dashboard that runs the voice ----------------------------------------------------------
-
-def _ids(body: dict) -> tuple[str, str]:
-    session_id, client_id = body.get("session_id"), body.get("client_id")
-    if not isinstance(session_id, str) or not isinstance(client_id, str):
-        raise HTTPException(status_code=400, detail="session_id and client_id are required")
-    return session_id, client_id
-
-
-@app.post("/api/session/claim")
-async def claim_session(body: dict):
-    """Called by the dashboard when its timeline reaches the AI start: returns the signed URL and the persona overrides."""
-    session_id, client_id = _ids(body)
-    try:
-        return await run_in_threadpool(entity.claim, session_id, client_id)
-    except LookupError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except PermissionError as e:
-        raise HTTPException(status_code=409, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=describe_error(e))
-
-
-@app.post("/api/session/report")
-async def report_session(body: dict):
-    """Events from the browser's conversation: connected, entity/visitor lines, ending, ended, errors."""
-    session_id, client_id = _ids(body)
-    event = body.get("event")
-    if not isinstance(event, dict):
-        raise HTTPException(status_code=400, detail="event must be an object")
-    try:
-        return {"ok": entity.report(session_id, client_id, event)}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
 @app.websocket("/ws")
 async def ws(websocket: WebSocket):
     if not _authorized(websocket.headers, websocket.cookies):
@@ -270,27 +235,13 @@ async def ws(websocket: WebSocket):
         return
     await websocket.accept()
     queue = bus.subscribe()
-    client_id: str | None = None
-
-    async def pump():
+    try:
         history, status_msg = bus.snapshot()
         await websocket.send_json({"type": "history", "entries": history})
         await websocket.send_json(status_msg)
         while True:
             await websocket.send_json(await queue.get())
-
-    sender = asyncio.create_task(pump())
-    try:
-        while True:
-            # The dashboard says hello with its client id and whether it has voice enabled.
-            msg = await websocket.receive_json()
-            if isinstance(msg, dict) and msg.get("type") == "hello" and isinstance(msg.get("client_id"), str):
-                client_id = msg["client_id"][:64]
-                entity.client_update(client_id, bool(msg.get("voice")))
-    except (WebSocketDisconnect, RuntimeError, ValueError):
+    except (WebSocketDisconnect, RuntimeError):
         pass
     finally:
-        sender.cancel()
         bus.unsubscribe(queue)
-        if client_id:
-            entity.client_gone(client_id)
