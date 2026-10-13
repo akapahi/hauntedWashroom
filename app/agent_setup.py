@@ -84,9 +84,14 @@ PLATFORM_SETTINGS = {
 }
 
 
-def _conversation_config(base: persona.Persona, voice_id: str) -> dict:
-    """The agent's stored defaults. Each conversation overrides prompt, first message and voice with its persona."""
-    return {
+def _conversation_config(base: persona.Persona, voice_id: str, have_languages: set[str] = frozenset()) -> dict:
+    """The agent's stored defaults. Each conversation overrides prompt, first message and voice with its persona.
+
+    have_languages: languages already enabled on the agent. Re-sending an existing language preset makes
+    ElevenLabs answer 500, so only the missing ones are included (the update is a PATCH: omitted = untouched).
+    """
+    missing = sorted({p.language for p in persona.PERSONAS if p.language != "en"} - set(have_languages))
+    config = {
         "agent": {
             "first_message": "{{opening_line}}",
             "language": "en",
@@ -104,12 +109,6 @@ def _conversation_config(base: persona.Persona, voice_id: str) -> dict:
                 "temperature": TEMPERATURE,
             },
         },
-        # Every language a persona speaks must be enabled on the agent ("additional languages") before a
-        # conversation may switch to it; the switch itself is the per-conversation language override.
-        "language_presets": {
-            lang: {"overrides": {"agent": {"language": lang}}}
-            for lang in sorted({p.language for p in persona.PERSONAS if p.language != "en"})
-        },
         # Only the voice is managed here. The TTS model (eleven_v3_conversational), expressive mode, audio
         # tags and voice settings are configured on the ElevenLabs website; the update is a PATCH, so
         # omitted fields are left untouched.
@@ -118,6 +117,17 @@ def _conversation_config(base: persona.Persona, voice_id: str) -> dict:
         "turn": {"turn_timeout": 30},
         "conversation": {"max_duration_seconds": MAX_CONVERSATION_SECONDS},
     }
+    if missing:
+        # Every language a persona speaks must be enabled on the agent ("additional languages") before a
+        # conversation may switch to it; the switch itself is the per-conversation language override.
+        config["language_presets"] = {lang: {"overrides": {"agent": {"language": lang}}} for lang in missing}
+    return config
+
+
+def _agent_languages(client: ElevenLabs, agent_id: str) -> set[str]:
+    """Languages already enabled on the agent (its additional-language presets). Raises ApiError (e.g. 404)."""
+    agent = client.conversational_ai.agents.get(agent_id)
+    return set((agent.conversation_config.language_presets or {}).keys())
 
 
 def check_persona_voices(client: ElevenLabs) -> dict[str, str]:
@@ -140,7 +150,6 @@ def sync_agent(client: ElevenLabs) -> tuple[str, dict[str, str]]:
     if not voices:
         raise RuntimeError("No persona has a usable voice")
     base = next(p for p in persona.PERSONAS if p.id in voices)
-    config = _conversation_config(base, voices[base.id])
     names = ", ".join(persona.PERSONA_BY_ID[i].name for i in voices)
     agent_id = load_agent_id()
     if not agent_id:
@@ -151,16 +160,20 @@ def sync_agent(client: ElevenLabs) -> tuple[str, dict[str, str]]:
 
     if agent_id:
         try:
+            config = _conversation_config(base, voices[base.id], _agent_languages(client, agent_id))
             client.conversational_ai.agents.update(
                 agent_id, conversation_config=config, platform_settings=PLATFORM_SETTINGS, name=persona.AGENT_NAME
             )
             bus.emit("system", f"Agent {agent_id} synced (llm {LLM}; personas: {names})")
             return agent_id, voices
         except ApiError as e:
-            if e.status_code in (401, 403):
+            if e.status_code in (401, 403) or e.status_code >= 500:
+                # No permission, or ElevenLabs is having trouble: the agent still exists with its last config,
+                # so the show can go on with that rather than refusing every trigger.
                 bus.emit(
                     "system",
-                    f"Can't update agent {agent_id} ({describe_error(e)}); using it as configured on ElevenLabs",
+                    f"Can't update agent {agent_id} ({describe_error(e)}); using it as configured on ElevenLabs. "
+                    "Press Resync agent later to push persona.py again.",
                     "warn",
                 )
                 return agent_id, voices
@@ -169,7 +182,7 @@ def sync_agent(client: ElevenLabs) -> tuple[str, dict[str, str]]:
             bus.emit("system", f"Saved agent {agent_id} no longer exists, creating a new one", "warn")
 
     created = client.conversational_ai.agents.create(
-        conversation_config=config,
+        conversation_config=_conversation_config(base, voices[base.id]),
         platform_settings=PLATFORM_SETTINGS,
         name=persona.AGENT_NAME,
         tags=[AGENT_TAG],
