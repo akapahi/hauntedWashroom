@@ -1041,7 +1041,8 @@ function runVoice(claim) {
   const v = voice = {
     id: claim.session_id, conv: null, fx: null, timer: null, ended: false, connected: false,
     started: now(), mode: "listening", lastSpeakEnd: now(), muted: false,
-    spoke: false,          // the entity has spoken since the last visitor turn (or since it arrived)
+    spoke: false,          // the entity has started speaking at all (the opening line)
+    awaitingReply: false,  // the visitor spoke (or stayed silent) and the entity hasn't answered yet
     userTurns: 0, silentTurns: 0, lastUserAt: 0, noticeSent: false,
     finishing: false, finishStarted: 0, farewellSpoke: false,
     end: endVoice,
@@ -1090,7 +1091,15 @@ function runVoice(claim) {
     else v.lastSpeakEnd = now();
   }
   function onEntity(text) {
-    report({ event: "entity", text });
+    // A turn is complete when the entity answers the visitor (or their silence). The opening line, and anything
+    // the entity says without being answered first, doesn't count.
+    if (v.awaitingReply) {
+      v.awaitingReply = false;
+      v.userTurns += 1;
+      report({ event: "entity", text, turn: v.userTurns });
+    } else {
+      report({ event: "entity", text });
+    }
     // The text arrives as its audio starts streaming, so the glide happens while it speaks.
     if (text.toLowerCase().includes(P.shift_tag)) shiftVoice();
   }
@@ -1098,14 +1107,17 @@ function runVoice(claim) {
     // ASR returns "..." for noise (flushes, hand dryers); bracketed text is our own injected prompt echoed back.
     if (!/\w/.test(text || "") || text.startsWith("[")) return;
     if (v.finishing) { report({ event: "visitor", text }); return; }
-    countTurn(text);
+    visitorInput(text);
   }
-  function countTurn(text) {   // returns true if it was the last turn
-    v.userTurns += 1;
+  // The visitor said something (or stayed silent). The turn itself is counted when the entity answers, so more
+  // speech before that answer (the ASR split a sentence, or they added something) joins the same turn.
+  // Returns true if the entity's answer to this will be its last (the farewell).
+  function visitorInput(text) {
     v.lastUserAt = now();
-    v.spoke = v.mode === "speaking";   // the reply to this turn is whatever the entity says from here on
-    report({ event: "visitor", text, turn: v.userTurns });
-    if (v.userTurns >= S.max_turns) { beginFarewell(); return true; }
+    report({ event: "visitor", text });
+    if (v.awaitingReply) return false;
+    v.awaitingReply = true;
+    if (v.userTurns + 1 >= S.max_turns) { beginFarewell(); return true; }
     return false;
   }
   function beginFarewell() {
@@ -1119,7 +1131,7 @@ function runVoice(claim) {
   function onSilentTurn() {
     v.silentTurns += 1;
     const sp = P.silence[Math.min(v.silentTurns, P.silence.length) - 1];
-    const last = countTurn(`(silent for ${S.silence_timeout}s)`);
+    const last = visitorInput(`(silent for ${S.silence_timeout}s)`);
     log(last ? `Silence #${v.silentTurns} on the final turn, the entity leaves (${sp.mood})`
              : `Silence #${v.silentTurns}, the entity provokes them (${sp.mood})`);
     send("user", last ? sp.final_prompt : sp.prompt);
@@ -1156,12 +1168,12 @@ function runVoice(claim) {
     if (S.half_duplex) setMuted(idleFor() < echoTail);
     if (!v.connected) return;
     // Once the entity has finished replying to turn N-1, warn it that turn N is the last.
-    if (!v.noticeSent && v.userTurns >= S.max_turns - 1 && v.spoke && idleFor() >= L.notice_idle_s) {
+    if (!v.noticeSent && v.userTurns >= S.max_turns - 1 && v.spoke && !v.awaitingReply && idleFor() >= L.notice_idle_s) {
       send("contextual", P.last_turn_notice);
       v.noticeSent = true;
       log("Told the entity the visitor's next reply is the last");
     }
-    if (v.spoke) {
+    if (v.spoke && !v.awaitingReply) {
       const silentFor = Math.min(idleFor(), v.lastUserAt ? t - v.lastUserAt : 1e9);
       if (silentFor > S.silence_timeout) onSilentTurn();
     }

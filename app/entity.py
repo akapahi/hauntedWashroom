@@ -313,15 +313,16 @@ class EntityController:
                 self._set_state(c, "active")
             bus.emit("system", f"Connected, the entity speaks first (max {s.max_turns} turns, ≤{s.max_words} words/reply)", client=c.id)
         elif kind == "entity":
-            bus.emit("entity", text, client=c.id)
-        elif kind == "visitor":
+            # A turn is counted when the entity answers the visitor (or their silence); the opening line isn't one.
             turn = event.get("turn")
             if isinstance(turn, int) and turn > 0:
                 session.user_turns = turn
-                bus.emit("visitor", f"[turn {turn}/{s.max_turns}] {text}", client=c.id)
+                bus.emit("entity", f"[turn {turn}/{s.max_turns}] {text}", client=c.id)
                 bus.set_client_status(c.id, turn=turn)
             else:
-                bus.emit("visitor", text, client=c.id)
+                bus.emit("entity", text, client=c.id)
+        elif kind == "visitor":
+            bus.emit("visitor", text, client=c.id)
         elif kind == "system":
             bus.emit("system", text, "warn" if event.get("level") == "warn" else "info", client=c.id)
         elif kind == "error":

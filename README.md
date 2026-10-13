@@ -114,7 +114,8 @@ Quick test without hardware: `curl -X POST -H "X-Trigger-Token: <token>" https:/
 - **Stop / skip cooldown** ends this device's conversation immediately, or skips its cooldown.
 - **🎙 voice** (header): whether *this* browser runs an entity, with its mic and speakers. See section 3.
 - **Settings** apply to the next conversation and are saved in `data/settings.json`:
-  - *Turns per conversation*: how many times the visitor speaks before the entity leaves.
+  - *Turns per conversation*: how many exchanges before the entity leaves. A turn is the visitor's reply (or
+    silence) plus the entity's answer to it; the opening line doesn't count.
   - *Reply length*: maximum words per entity reply.
   - *Provoke after silence*: if the visitor stays quiet this long, the entity provokes them. The silence
     counts as a turn. It gets worse each time: taunting, then agitated, then angry and offended.
@@ -151,7 +152,7 @@ Quick test without hardware: `curl -X POST -H "X-Trigger-Token: <token>" https:/
   dropout and stutter odds). **Test tape** plays the music for 2 s and winds it down without triggering
   the entity. These live in the browser's localStorage, not on the server, so each dashboard device
   keeps its own.
-- **Logs** stream live: triggers, what the visitor said (with the turn number), what the entity said,
+- **Logs** stream live: triggers, what the visitor said, what the entity said (with the turn number its answer completes),
   system events and errors. By default a dashboard shows its own entity's lines plus server-wide ones; tick
   **All devices** to see every device's conversation, tagged with the first characters of its id. Everything
   is also written to `logs/entity.log`.
@@ -159,7 +160,9 @@ Quick test without hardware: `curl -X POST -H "X-Trigger-Token: <token>" https:/
 ## How a conversation ends
 
 1. The entity speaks a random opening line from `app/persona.py`.
-2. Each visitor utterance counts as one turn. Noise transcripts like "..." are ignored.
+2. A turn is counted each time the entity answers the visitor: one visitor message (or silence) plus the entity's
+   reply. The opening line doesn't count, and anything more the visitor says before the entity has replied joins
+   the same turn. Noise transcripts like "..." are ignored.
 3. After the entity finishes replying to turn N-1, the voice device sends the agent a contextual update saying the
    next turn is the last.
 4. On turn N the mic is muted, the entity replies and says it's leaving, and the session closes once the
