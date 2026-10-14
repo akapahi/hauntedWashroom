@@ -1,4 +1,5 @@
-elevenlabs[pyaudio]>=2.70.0
+elevenlabs>=2.70.0
+sounddevice>=0.4.6
 fastapi>=0.115
 uvicorn[standard]>=0.30
 python-dotenv>=1.0

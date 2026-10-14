@@ -2,7 +2,7 @@
 
 Flow: trigger -> the idle music winds down like a tape at detune_start_ms -> res/<Persona>/approach.wav plays
 at approach_start_ms -> ai_lead_ms before the cue ends, connect to the ElevenLabs agent (mic + speaker here, via
-PyAudio) -> entity speaks first (opening line) -> visitor/entity exchange turns -> after the entity replies to
+sounddevice) -> entity speaks first (opening line) -> visitor/entity exchange turns -> after the entity replies to
 visitor turn N-1 the agent is told the next turn is the last -> visitor's turn N mutes the mic -> entity replies
 + says it's leaving -> playback drains -> session ends -> cooldown -> idle (the music comes back).
 

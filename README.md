@@ -34,7 +34,7 @@ Raspberry Pi OS (Bookworm or later, 64-bit recommended). Its sound server is Pip
 end, which is what the app talks to; older images with plain PulseAudio work the same.
 
 ```bash
-sudo apt install -y python3-venv python3-dev portaudio19-dev ffmpeg pulseaudio-utils
+sudo apt install -y python3-venv libportaudio2 ffmpeg pulseaudio-utils
 git clone <this repo> washroom && cd washroom
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt          # numpy/scipy come from piwheels, no compiling
@@ -50,7 +50,7 @@ pip install -r requirements.txt`); voice shifting is only logged there, since it
 
 1. Plug in your mic and speakers. `pactl list short sinks` lists the outputs (headphone jack, HDMI, USB sound
    cards), `pactl list short sources` the inputs. `pactl set-default-source <name>` picks the mic.
-2. Leave `AUDIO_INPUT_DEVICE` / `AUDIO_OUTPUT_DEVICE` blank in `.env`: PyAudio then uses PulseAudio's defaults.
+2. Leave `AUDIO_INPUT_DEVICE` / `AUDIO_OUTPUT_DEVICE` blank in `.env`: sounddevice then uses PulseAudio's defaults.
    `python list_devices.py` shows the indexes if you ever need to pin one.
 3. **Voice shifting** (the entity moving around the room): put speakers in different spots, each on its own
    output, and enter their sink names in the dashboard's *Outputs* field (comma-separated; the field suggests

@@ -1,4 +1,4 @@
-"""Local mic/speaker I/O for the ElevenLabs conversation (PyAudio, 16 kHz mono PCM).
+"""Local mic/speaker I/O for the ElevenLabs conversation (sounddevice, 16 kHz mono PCM).
 
 Differs from the SDK's DefaultAudioInterface in that it:
 - can mute the mic (sends silence) e.g. while the entity says goodbye,
@@ -25,6 +25,7 @@ SAMPLE_RATE = 16000
 INPUT_FRAMES_PER_BUFFER = 4000   # 250 ms
 OUTPUT_FRAMES_PER_BUFFER = 1000  # 62.5 ms
 ECHO_TAIL_SECONDS = 0.4          # keep the mic muted briefly after playback (room reverb)
+WAV_DTYPES = {1: "uint8", 2: "int16", 3: "int24", 4: "int32"}  # WAV sample width (bytes) -> sounddevice dtype
 
 
 def _device_index(env_name: str) -> int | None:
@@ -40,40 +41,31 @@ def wav_seconds(path: Path) -> float:
 def play_wav(path: Path, stop: threading.Event | None = None) -> float:
     """Blocking: play a WAV file on the entity's output device (AUDIO_OUTPUT_DEVICE), at the file's own
     rate and channel count. Returns the seconds actually played; stops early if `stop` is set."""
-    import pyaudio
+    import sounddevice as sd
 
     with wave.open(str(path), "rb") as wf:
-        p = pyaudio.PyAudio()
-        try:
-            stream = p.open(
-                format=p.get_format_from_width(wf.getsampwidth()),
-                channels=wf.getnchannels(),
-                rate=wf.getframerate(),
-                output=True,
-                output_device_index=_device_index("AUDIO_OUTPUT_DEVICE"),
-            )
-            try:
-                frame_bytes = wf.getnchannels() * wf.getsampwidth()
-                played = 0
-                while not (stop and stop.is_set()):
-                    data = wf.readframes(OUTPUT_FRAMES_PER_BUFFER)
-                    if not data:
-                        break
-                    stream.write(data)
-                    played += len(data) // frame_bytes
-                return played / wf.getframerate()
-            finally:
-                stream.stop_stream()
-                stream.close()
-        finally:
-            p.terminate()
+        with sd.RawOutputStream(
+            samplerate=wf.getframerate(),
+            channels=wf.getnchannels(),
+            dtype=WAV_DTYPES[wf.getsampwidth()],
+            device=_device_index("AUDIO_OUTPUT_DEVICE"),
+        ) as stream:
+            frame_bytes = wf.getnchannels() * wf.getsampwidth()
+            played = 0
+            while not (stop and stop.is_set()):
+                data = wf.readframes(OUTPUT_FRAMES_PER_BUFFER)
+                if not data:
+                    break
+                stream.write(data)
+                played += len(data) // frame_bytes
+            return played / wf.getframerate()
 
 
 class EntityAudioInterface(AudioInterface):
     def __init__(self, half_duplex: bool = True, reverb_mix: float = 0.0, reverb_decay: float = 1.5):
-        import pyaudio
+        import sounddevice
 
-        self.pyaudio = pyaudio
+        self.sd = sounddevice
         self.half_duplex = half_duplex
         self.reverb = Reverb(reverb_mix, reverb_decay, SAMPLE_RATE) if reverb_mix > 0 else None
         self.muted = False
@@ -88,26 +80,23 @@ class EntityAudioInterface(AudioInterface):
         self.input_callback = input_callback
         self.output_queue: queue.Queue[bytes] = queue.Queue()
         self.should_stop = threading.Event()
-        self.p = self.pyaudio.PyAudio()
-        self.in_stream = self.p.open(
-            format=self.pyaudio.paInt16,
+        self.in_stream = self.sd.RawInputStream(
+            samplerate=SAMPLE_RATE,
             channels=1,
-            rate=SAMPLE_RATE,
-            input=True,
-            input_device_index=_device_index("AUDIO_INPUT_DEVICE"),
-            stream_callback=self._in_callback,
-            frames_per_buffer=INPUT_FRAMES_PER_BUFFER,
-            start=True,
+            dtype="int16",
+            device=_device_index("AUDIO_INPUT_DEVICE"),
+            callback=self._in_callback,
+            blocksize=INPUT_FRAMES_PER_BUFFER,
         )
-        self.out_stream = self.p.open(
-            format=self.pyaudio.paInt16,
+        self.out_stream = self.sd.RawOutputStream(
+            samplerate=SAMPLE_RATE,
             channels=1,
-            rate=SAMPLE_RATE,
-            output=True,
-            output_device_index=_device_index("AUDIO_OUTPUT_DEVICE"),
-            frames_per_buffer=OUTPUT_FRAMES_PER_BUFFER,
-            start=True,
+            dtype="int16",
+            device=_device_index("AUDIO_OUTPUT_DEVICE"),
+            blocksize=OUTPUT_FRAMES_PER_BUFFER,
         )
+        self.in_stream.start()
+        self.out_stream.start()
         self.last_play_end = time.monotonic()
         self.output_thread = threading.Thread(target=self._output_loop, daemon=True, name="entity-audio-out")
         self.output_thread.start()
@@ -122,11 +111,10 @@ class EntityAudioInterface(AudioInterface):
         self.output_thread.join(timeout=2)
         for stream in (self.in_stream, self.out_stream):
             try:
-                stream.stop_stream()
+                stream.stop()
                 stream.close()
-            except OSError:
+            except Exception:
                 pass
-        self.p.terminate()
 
     def output(self, audio: bytes):
         self.chunks_received += 1
@@ -173,6 +161,6 @@ class EntityAudioInterface(AudioInterface):
     def _in_callback(self, in_data, frame_count, time_info, status):
         if self.input_callback:
             if self.muted or (self.half_duplex and self.idle_for() < ECHO_TAIL_SECONDS):
-                in_data = bytes(len(in_data))  # silence keeps the stream (and server VAD) alive
-            self.input_callback(in_data)
-        return (None, self.pyaudio.paContinue)
+                self.input_callback(bytes(len(in_data)))  # silence keeps the stream (and server VAD) alive
+            else:
+                self.input_callback(bytes(in_data))

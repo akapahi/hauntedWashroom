@@ -1,7 +1,7 @@
 """Idle music on this machine's speakers, with the tape wind-down that kills it when the entity is triggered.
 
 The track (res/Infinite_Dancefloor.mp3, or any .wav/.mp3 given to MusicPlayer) is decoded once at startup
-(ffmpeg for anything that isn't a WAV) and looped through a PyAudio output stream.
+(ffmpeg for anything that isn't a WAV) and looped through a sounddevice output stream.
 
 Tape wind-down: over `duration` seconds the music slowly detunes (a tape reel losing speed, with a slow wow and
 a faster flutter on top), gets muffled and resonant (a lowpass closing with rising Q), and distorts (gain driven
@@ -171,17 +171,16 @@ class MusicPlayer:
     # ---- the stream ---------------------------------------------------------------
 
     def _loop(self):
-        import pyaudio
+        import sounddevice as sd
 
-        p = pyaudio.PyAudio()
         try:
-            stream = p.open(
-                format=pyaudio.paFloat32, channels=2, rate=RATE, output=True,
-                output_device_index=_device_index("AUDIO_OUTPUT_DEVICE"), frames_per_buffer=BLOCK,
+            stream = sd.RawOutputStream(
+                samplerate=RATE, channels=2, dtype="float32",
+                device=_device_index("AUDIO_OUTPUT_DEVICE"), blocksize=BLOCK,
             )
-        except OSError as e:
+            stream.start()
+        except Exception as e:
             bus.emit("error", f"Couldn't open the speaker for the idle music: {e}", "error")
-            p.terminate()
             return
         self._changed("playing")
         try:
@@ -196,11 +195,10 @@ class MusicPlayer:
             self._ending.set()
             self._wind = None
             try:
-                stream.stop_stream()
+                stream.stop()
                 stream.close()
-            except OSError:
+            except Exception:
                 pass
-            p.terminate()
             self._changed("stopped")
 
     def _next_block(self) -> np.ndarray | None:
