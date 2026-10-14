@@ -21,6 +21,7 @@ from pathlib import Path
 import numpy as np
 from scipy.signal import lfilter
 
+from .audio import _device_index
 from .logbus import bus
 
 RATE = 44100
@@ -30,13 +31,6 @@ TAPE_PARAMS = (
     "tape_die_at", "tape_floor_speed", "tape_wow_hz", "tape_wow_depth", "tape_flutter_hz", "tape_flutter_depth",
     "tape_filter_hz", "tape_q_max", "tape_drive_max", "tape_dropout", "tape_stutter",
 )
-
-
-def _device_index(env_name: str) -> int | None:
-    import os
-
-    value = os.getenv(env_name, "").strip()
-    return int(value) if value else None
 
 
 def _decode(path: Path) -> np.ndarray | None:
@@ -171,9 +165,9 @@ class MusicPlayer:
     # ---- the stream ---------------------------------------------------------------
 
     def _loop(self):
-        import sounddevice as sd
-
         try:
+            import sounddevice as sd   # raises OSError if the PortAudio library is missing (apt install libportaudio2)
+
             stream = sd.RawOutputStream(
                 samplerate=RATE, channels=2, dtype="float32",
                 device=_device_index("AUDIO_OUTPUT_DEVICE"), blocksize=BLOCK,

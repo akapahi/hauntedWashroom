@@ -28,9 +28,25 @@ ECHO_TAIL_SECONDS = 0.4          # keep the mic muted briefly after playback (ro
 WAV_DTYPES = {1: "uint8", 2: "int16", 3: "int24", 4: "int32"}  # WAV sample width (bytes) -> sounddevice dtype
 
 
-def _device_index(env_name: str) -> int | None:
+SOUND_SERVER_DEVICES = ("pipewire", "pulse", "default")  # ALSA devices that route through PipeWire/PulseAudio
+
+
+def _device_index(env_name: str) -> int | str | None:
+    """The device from AUDIO_INPUT_DEVICE / AUDIO_OUTPUT_DEVICE (an index from list_devices.py, or part of a
+    device name). Blank picks the sound server's device on Linux, so audio follows the default sink/source
+    (e.g. Bluetooth speakers) instead of going straight to a hardware card."""
     value = os.getenv(env_name, "").strip()
-    return int(value) if value else None
+    if value:
+        return int(value) if value.isdigit() else value
+    import sounddevice as sd
+
+    kind = "max_input_channels" if "INPUT" in env_name else "max_output_channels"
+    devices = sd.query_devices()
+    for name in SOUND_SERVER_DEVICES:
+        for i, d in enumerate(devices):
+            if d["name"] == name and d[kind] > 0:
+                return i
+    return None
 
 
 def wav_seconds(path: Path) -> float:
