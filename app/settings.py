@@ -19,6 +19,7 @@ class Settings:
     max_words: int = 25         # upper bound on words per entity reply
     silence_timeout: int = 10   # seconds of visitor silence before the entity provokes them (uses up a turn)
     cooldown: int = 10          # seconds after a conversation during which triggers are ignored
+    sensor_confirm: int = 3     # PRESENT status lines in a row (one per 2 s) from the serial sensor before triggering
     # Timeline, in ms after the trigger. All of it plays on this machine's speakers.
     detune_start_ms: int = 0        # idle music starts winding down like a tape
     detune_len_ms: int = 3000       # how long the wind-down takes
@@ -57,6 +58,7 @@ LIMITS = {
     "max_words": (5, 100),
     "silence_timeout": (5, 25),
     "cooldown": (0, 600),
+    "sensor_confirm": (1, 20),
     "detune_start_ms": (0, 60000),
     "detune_len_ms": (500, 30000),
     "approach_start_ms": (0, 60000),

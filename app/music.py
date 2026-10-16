@@ -1,7 +1,7 @@
 """Idle music on this machine's speakers, with the tape wind-down that kills it when the entity is triggered.
 
 The track (res/Infinite_Dancefloor.mp3, or any .wav/.mp3 given to MusicPlayer) is decoded once at startup
-(ffmpeg for anything that isn't a WAV) and looped through a sounddevice output stream.
+(ffmpeg for anything that isn't a WAV) and looped through a sounddevice output stream. It fades in when it starts and fades out when it's switched off.
 
 Tape wind-down: over `duration` seconds the music slowly detunes (a tape reel losing speed, with a slow wow and
 a faster flutter on top), gets muffled and resonant (a lowpass closing with rising Q), and distorts (gain driven
@@ -27,6 +27,8 @@ from .logbus import bus
 RATE = 44100
 BLOCK = 1024                 # frames per block (~23 ms)
 MIN_RATE = 0.0625            # the slowest the tape goes before it stops
+FADE_IN_SECONDS = 3.0
+FADE_OUT_SECONDS = 2.0
 TAPE_PARAMS = (
     "tape_die_at", "tape_floor_speed", "tape_wow_hz", "tape_wow_depth", "tape_flutter_hz", "tape_flutter_depth",
     "tape_filter_hz", "tape_q_max", "tape_drive_max", "tape_dropout", "tape_stutter",
@@ -90,6 +92,8 @@ class MusicPlayer:
         self._ending = threading.Event()    # the loop has finished producing audio and is closing the stream
         self._pos = 0.0                 # read position in frames (fractional while winding down)
         self._wind: dict | None = None  # {t0, duration, params, zi} while the tape is dying
+        self._gain = 0.0                # fade gain, 0..1
+        self._fade_out = False          # fading toward silence; the loop ends when it gets there
         self.on_change = None           # called with "playing" | "winding" | "stopped"
 
     def _changed(self, what: str):
@@ -134,16 +138,23 @@ class MusicPlayer:
                 return
             if self.playing:
                 if not self._ending.is_set():
+                    self._fade_out = False   # switched back on mid fade-out: fade back in
                     return
                 self._thread.join(timeout=2)   # a wind-down just finished: let it close its stream first
             self._stop.clear()
             self._ending.clear()
             self._pos = 0.0
             self._wind = None
+            self._gain = 0.0
+            self._fade_out = False
             self._thread = threading.Thread(target=self._loop, daemon=True, name="idle-music")
             self._thread.start()
 
-    def stop(self):
+    def stop(self, fade: bool = True):
+        """Fade out and stop (in the background), or stop right away with fade=False."""
+        if fade and self.playing and not self._ending.is_set():
+            self._fade_out = True
+            return
         self._stop.set()
         t = self._thread
         if t and t is not threading.current_thread():
@@ -182,6 +193,9 @@ class MusicPlayer:
                 block = self._next_block()
                 if block is None:
                     break
+                block = self._apply_fade(block)
+                if block is None:
+                    break
                 stream.write(np.clip(block, -1.0, 1.0).astype(np.float32).tobytes())
         except Exception as e:
             bus.emit("error", f"Idle music stopped: {e}", "error")
@@ -194,6 +208,20 @@ class MusicPlayer:
             except Exception:
                 pass
             self._changed("stopped")
+
+    def _apply_fade(self, block: np.ndarray) -> np.ndarray | None:
+        """Ramps the fade gain across the block. None once a fade-out has reached silence."""
+        g0 = self._gain
+        if self._fade_out:
+            g1 = max(0.0, g0 - BLOCK / (RATE * FADE_OUT_SECONDS))
+        else:
+            g1 = min(1.0, g0 + BLOCK / (RATE * FADE_IN_SECONDS))
+        self._gain = g1
+        if g0 == g1 == 0.0 and self._fade_out:
+            return None
+        if g0 == g1 == 1.0:
+            return block
+        return block * np.linspace(g0, g1, BLOCK, endpoint=False, dtype=np.float32)[:, None]
 
     def _next_block(self) -> np.ndarray | None:
         track = self.track

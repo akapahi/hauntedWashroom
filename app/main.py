@@ -35,6 +35,7 @@ from . import persona  # noqa: E402
 from .agent_setup import describe_error  # noqa: E402
 from .entity import EntityController, approach_cue_seconds, approach_cue_url  # noqa: E402
 from .logbus import bus, setup_logging  # noqa: E402
+from .sensor import SerialSensor  # noqa: E402
 from .settings import LIMITS, RES_DIR, ROOT_DIR, SettingsStore  # noqa: E402
 
 TRIGGER_TOKEN = os.getenv("TRIGGER_TOKEN", "").strip()
@@ -68,9 +69,12 @@ async def lifespan(app: FastAPI):
     # Audio setup and the agent sync run in the background so the dashboard is reachable even if
     # ElevenLabs is slow/unreachable.
     threading.Thread(target=_safe_setup, daemon=True).start()
+    sensor = SerialSensor(entity, store)
+    sensor.start()
     yield
+    sensor.stop()
     entity.stop()
-    entity.music.stop()
+    entity.music.stop(fade=False)
 
 
 def _safe_setup():

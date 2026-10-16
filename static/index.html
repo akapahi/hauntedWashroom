@@ -219,6 +219,11 @@
           <input type="number" id="cooldown" name="cooldown" min="0" max="600" required>
           <small>Sensor triggers are ignored during this time.</small>
         </div>
+        <div class="field">
+          <label for="sensor_confirm">Presence readings before triggering</label>
+          <input type="number" id="sensor_confirm" name="sensor_confirm" min="1" max="20" required>
+          <small>The serial sensor reports every 2 s; it must say PRESENT this many times in a row.</small>
+        </div>
         <fieldset class="group">
           <legend>Timeline (seconds after the trigger)</legend>
           <div class="tl-grid">
@@ -355,7 +360,7 @@ const TAPE_SPEC = [
 ];
 const TAPE_KEYS = TAPE_SPEC.map(([k]) => k);
 const FIELDS = [
-  "max_turns", "max_words", "silence_timeout", "cooldown", ...TL_KEYS, "persona", "idle_music", "music_volume",
+  "max_turns", "max_words", "silence_timeout", "cooldown", "sensor_confirm", ...TL_KEYS, "persona", "idle_music", "music_volume",
   "reverb_mix", "reverb_decay_ms", "shift_enabled", "shift_outputs", "shift_level", "shift_ms", "half_duplex", ...TAPE_KEYS,
 ];
 const RANGE_LABELS = {

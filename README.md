@@ -94,6 +94,14 @@ LAN) and call `triggerEntity()` from your sensor code.
 
 Quick test without hardware: `curl -X POST http://localhost:8000/api/trigger`
 
+### Presence sensor over USB serial
+
+Instead of WiFi, the XIAO ESP32S3 + 24GHz mmWave sketch can be plugged into the Pi by USB. The server reads its
+`status=PRESENT | ...` lines (one every 2 s) and triggers the entity after *Presence readings before triggering*
+(dashboard, default 3) PRESENT lines in a row; an EMPTY resets the count. While a conversation or cooldown runs, the
+serial output is ignored. The port is auto-detected; set `SENSOR_PORT=/dev/ttyACM0` in `.env` to pick it, or
+`SENSOR_PORT=off` to disable it. On the Pi your user needs serial access: `sudo usermod -aG dialout $USER`, then log in again.
+
 ## 6. Dashboard
 
 - **Simulate sensor** does the same thing as an ESP32 trigger.
