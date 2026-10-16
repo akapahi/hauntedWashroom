@@ -2,7 +2,7 @@
 
 Flow: trigger -> the idle music winds down like a tape at detune_start_ms -> res/<Persona>/approach.wav plays
 at approach_start_ms -> ai_lead_ms before the cue ends, connect to the ElevenLabs agent (mic + speaker here, via
-sounddevice) -> entity speaks first (opening line) -> visitor/entity exchange turns -> after the entity replies to
+sounddevice) -> the entity listens (no opening line; the visitor speaks first) -> visitor/entity exchange turns -> after the entity replies to
 visitor turn N-1 the agent is told the next turn is the last -> visitor's turn N mutes the mic -> entity replies
 + says it's leaving -> playback drains -> session ends -> cooldown -> idle (the music comes back).
 
@@ -10,7 +10,6 @@ The dashboard only shows logs and settings; it plays nothing itself.
 """
 
 import os
-import random
 import re
 import threading
 import time
@@ -44,6 +43,7 @@ class Session:
     settings: Settings
     started: float = field(default_factory=time.monotonic)
     connected: bool = False
+    connected_at: float = 0.0
     user_turns: int = 0
     silent_turns: int = 0         # times the visitor ignored the entity (drives its escalating mood)
     last_user_at: float = 0.0
@@ -290,7 +290,6 @@ class EntityController:
                 reverb_mix=settings.reverb_mix / 100,
                 reverb_decay=settings.reverb_decay_ms / 1000,
             )
-            opening = random.choice(character.opening_lines)
             conv = Conversation(
                 self.client,
                 self.agent_id,
@@ -302,12 +301,12 @@ class EntityController:
                             "prompt": {
                                 "prompt": persona.system_prompt(character).replace("{{max_words}}", str(settings.max_words))
                             },
-                            "first_message": opening,
+                            "first_message": "",  # no opening line: the entity listens first
                             "language": character.language,
                         },
                         "tts": {"voice_id": self.persona_voices[character.id]},
                     },
-                    dynamic_variables={"opening_line": opening, "max_words": settings.max_words},
+                    dynamic_variables={"max_words": settings.max_words},
                 ),
                 callback_agent_response=self._on_agent_response,
                 callback_agent_response_correction=lambda orig, new: bus.emit("entity", f"(interrupted) {new}"),
@@ -359,8 +358,9 @@ class EntityController:
 
             if not session.connected and conv._conversation_id:
                 session.connected = True
+                session.connected_at = now
                 self._set_state("active")
-                bus.emit("system", f"Connected, the entity speaks first (max {s.max_turns} turns, ≤{s.max_words} words/reply)")
+                bus.emit("system", f"Connected, listening to the visitor (max {s.max_turns} turns, ≤{s.max_words} words/reply)")
 
             if session.finishing:
                 farewell_started = audio.chunks_received > session.finish_audio_mark
@@ -383,8 +383,10 @@ class EntityController:
                     session.notice_sent = True
                     bus.emit("system", "Told the entity the visitor's next reply is the last")
 
-                if entity_replied:
-                    silent_for = min(audio.idle_for(), now - session.last_user_at if session.last_user_at else 1e9)
+                # The visitor speaks first, so their silence counts from the connection until their first turn.
+                if entity_replied or session.user_turns == 0:
+                    since = session.last_user_at or session.connected_at
+                    silent_for = min(audio.idle_for(), now - since)
                     if silent_for > s.silence_timeout:
                         self._on_silent_turn(conv, session, audio)
 

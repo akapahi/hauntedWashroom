@@ -93,13 +93,12 @@ def _conversation_config(base: persona.Persona, voice_id: str, have_languages: s
     missing = sorted({p.language for p in persona.PERSONAS if p.language != "en"} - set(have_languages))
     config = {
         "agent": {
-            "first_message": "{{opening_line}}",
+            "first_message": "",  # no opening line: the agent waits for the visitor to speak
             "language": "en",
             "hinglish_mode": False,
             "disable_first_message_interruptions": True,
             "dynamic_variables": {
                 "dynamic_variable_placeholders": {
-                    "opening_line": base.opening_lines[0],
                     "max_words": 25,
                 }
             },
